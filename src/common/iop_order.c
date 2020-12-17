@@ -99,6 +99,7 @@ const dt_iop_order_entry_t legacy_order[] = {
   { {21.0f }, "clipping", 0},
   { {21.5f }, "toneequal", 0},
   { {22.0f }, "graduatednd", 0},
+  { {22.5f }, "linearsaturation", 0},
   { {23.0f }, "basecurve", 0},
   { {24.0f }, "bilateral", 0},
   { {25.0f }, "profile_gamma", 0},
@@ -214,6 +215,7 @@ const dt_iop_order_entry_t v30_order[] = {
   { {41.0f }, "colorbalance", 0},    // scene-referred color manipulation
   { {42.0f }, "rgbcurve", 0},        // really versatile way to edit colour in scene-referred and display-referred workflow
   { {43.0f }, "rgblevels", 0},       // same
+  { {43.5f }, "linearsaturation", 0},
   { {44.0f }, "basecurve", 0},       // conversion from scene-referred to display referred, reverse-engineered
                                   //    on camera JPEG default look
   { {45.0f }, "filmic", 0},          // same, but different (parametric) approach

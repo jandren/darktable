@@ -27,6 +27,7 @@
    DT_RGB_NORM_SUM = 4,       // $DESCRIPTION: "sum RGB"
    DT_RGB_NORM_NORM = 5,      // $DESCRIPTION: "norm RGB"
    DT_RGB_NORM_POWER = 6,     // $DESCRIPTION: "basic power"
+   DT_RGB_NORM_ACES = 7,      // $DESCRIPTION: "aces"
  } dt_iop_rgb_norms_t;
 
 static inline float dt_rgb_norm(const float *in, const int norm, const dt_iop_order_iccprofile_info_t *const work_profile)
@@ -65,6 +66,15 @@ static inline float dt_rgb_norm(const float *in, const int norm, const dt_iop_or
     G = in[1] * in[1];
     B = in[2] * in[2];
     return (in[0] * R + in[1] * G + in[2] * B) / (R + G + B);
+  }
+  else if (norm == DT_RGB_NORM_ACES)
+  {
+    const float ycRadiusWeight = 1.75f;
+    float r = in[0]; 
+    float g = in[1]; 
+    float b = in[2];
+    float chroma = powf(b*(b-g)+g*(g-r)+r*(r-b), 0.5f);
+    return ( b + g + r + ycRadiusWeight * chroma) / 3.0f;
   }
   else return (in[0] + in[1] + in[2]) / 3.0f;
 }

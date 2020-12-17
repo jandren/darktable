@@ -57,6 +57,13 @@ typedef struct dt_iop_basecurve_node_t
   float y; // $MIN: 0.0 $MAX: 1.0
 } dt_iop_basecurve_node_t;
 
+ typedef enum dt_iop_basecurve_method_t
+ {
+   DT_BASE_CURVE = 0,      // $DESCRIPTION: "curve"
+   DT_BASE_PARAMETRIC = 1, // $DESCRIPTION: "parametric"
+   DT_BASE_WEIBULL = 2,    // $DESCRIPTION: "weibull"
+ } dt_iop_basecurve_method_t;
+
 typedef struct dt_iop_basecurve_params_t
 {
   // three curves (c, ., .) with max number of nodes
@@ -71,6 +78,9 @@ typedef struct dt_iop_basecurve_params_t
   float exposure_bias;    /* whether to do exposure-fusion with over or under-exposure
                              $MIN: -1.0 $MAX: 1.0 $DEFAULT: 1.0 $DESCRIPTION: "exposure bias" */
   dt_iop_rgb_norms_t preserve_colors; /* $DEFAULT: DT_RGB_NORM_LUMINANCE $DESCRIPTION: "preserve colors" */
+  dt_iop_basecurve_method_t response_method; /* $DEFAULT: DT_BASE_CURVE $DESCRIPTION: "response definition method" */
+  float pivot; /* $DEFAULT: 0.18 $MIN: 0.1 $MAX: 0.9 $DESCRIPTION: "equal color pivot point, usually grey" */
+  float power; /* $DEFAULT: 1.6 $MIN: 1.0 $MAX: 10.0 $DESCRIPTION: "contrast power" */
 } dt_iop_basecurve_params_t;
 
 typedef struct dt_iop_basecurve_params5_t
@@ -128,11 +138,11 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
                                         { { 0.0, 0.0 }, { 1.0, 1.0 } },
                                       },
                                       { 2, 3, 3 },
-                                      { MONOTONE_HERMITE, MONOTONE_HERMITE, MONOTONE_HERMITE } , 0, 1};
+                                      { CATMULL_ROM, CATMULL_ROM, CATMULL_ROM } , 0, 1};
     for(int k = 0; k < 6; k++) n->basecurve[0][k].x = o->tonecurve_x[k];
     for(int k = 0; k < 6; k++) n->basecurve[0][k].y = o->tonecurve_y[k];
     n->basecurve_nodes[0] = 6;
-    n->basecurve_type[0] = CUBIC_SPLINE;
+    n->basecurve_type[0] = CATMULL_ROM;
     n->exposure_fusion = 0;
     n->exposure_stops = 1;
     n->exposure_bias = 1.0;
@@ -186,16 +196,16 @@ typedef struct dt_iop_basecurve_gui_data_t
   int minmax_curve_type, minmax_curve_nodes;
   GtkBox *hbox;
   GtkDrawingArea *area;
-  GtkWidget *fusion, *exposure_step, *exposure_bias;
-  GtkWidget *cmb_preserve_colors;
+  GtkWidget *interpolator, *fusion, *exposure_step, *exposure_bias;
+  GtkWidget *cmb_preserve_colors, *cmb_response_method;
   double mouse_x, mouse_y;
   int selected;
   double selected_offset, selected_y, selected_min, selected_max;
   float draw_xs[DT_IOP_TONECURVE_RES], draw_ys[DT_IOP_TONECURVE_RES];
   float draw_min_xs[DT_IOP_TONECURVE_RES], draw_min_ys[DT_IOP_TONECURVE_RES];
   float draw_max_xs[DT_IOP_TONECURVE_RES], draw_max_ys[DT_IOP_TONECURVE_RES];
-  float loglogscale;
-  GtkWidget *logbase;
+  float loglogscale, value_power, value_pivot;
+  GtkWidget *logbase, *parametric_power, *parametric_pivot;
 } dt_iop_basecurve_gui_data_t;
 
 void init_key_accels(dt_iop_module_so_t *self)
@@ -210,7 +220,11 @@ void connect_key_accels(dt_iop_module_t *self)
   dt_iop_basecurve_gui_data_t *g = (dt_iop_basecurve_gui_data_t *)self->gui_data;
 
   dt_accel_connect_slider_iop(self, "graph scale", GTK_WIDGET(g->logbase));
+  dt_accel_connect_slider_iop(self, "power", GTK_WIDGET(g->parametric_power));
+  dt_accel_connect_slider_iop(self, "pivot", GTK_WIDGET(g->parametric_pivot));
+  dt_accel_connect_combobox_iop(self, "interpolator", GTK_WIDGET(g->interpolator));
   dt_accel_connect_combobox_iop(self, "preserve colors", GTK_WIDGET(g->cmb_preserve_colors));
+  dt_accel_connect_combobox_iop(self, "response method", GTK_WIDGET(g->cmb_response_method));
   dt_accel_connect_combobox_iop(self, "exposure fusion", GTK_WIDGET(g->fusion));
 }
 
@@ -320,6 +334,9 @@ typedef struct dt_iop_basecurve_data_t
   float exposure_stops;
   float exposure_bias;
   int preserve_colors;
+  int response_method;
+  float pivot;
+  float power;
 } dt_iop_basecurve_data_t;
 
 typedef struct dt_iop_basecurve_global_data_t
@@ -1360,6 +1377,73 @@ void process_lut(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, co
     apply_curve(in, out, wd, ht, d->preserve_colors, 1.0, d->table, d->unbounded_coeffs, work_profile);
 }
 
+void process_parametric(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
+                 void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
+{
+  //const int ch = piece->colors; <-- it appears someone was trying to make this handle monochrome data,
+  //however the for loops only handled RGBA - FIXME, determine what possible data formats and channel
+  //configurations we might encounter here and handle those too
+  dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)(piece->data);
+  // const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+
+  const float *const in = (const float *)ivoid;
+  float *const out = (float *)ovoid;
+  const int width = roi_in->width, height = roi_in->height;
+
+  const float power = d->power;
+  const float pivot = d->pivot; 
+  const float grey = (1 - pivot) / pivot;
+
+  for(size_t k = 0; k < (size_t)width * height; k++)
+  {
+    const float *inp = in + 4 * k;
+    float *outp = out + 4 * k;
+    for(int i = 0; i < 3; i++)
+    {
+      if (inp[i] > 0.0)
+        outp[i] = 1.0 - grey / (grey + powf(inp[i] / pivot, power));
+      else
+      {
+        outp[i] = 0.0;
+      }
+    } 
+    outp[3] = inp[3];
+  }
+}
+
+void process_weibull(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
+                 void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
+{
+  //const int ch = piece->colors; <-- it appears someone was trying to make this handle monochrome data,
+  //however the for loops only handled RGBA - FIXME, determine what possible data formats and channel
+  //configurations we might encounter here and handle those too
+  dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)(piece->data);
+  // const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+
+  const float *const in = (const float *)ivoid;
+  float *const out = (float *)ovoid;
+  const int width = roi_in->width, height = roi_in->height;
+
+  const float power = 0.91f * d->power;
+  const float pivot = d->pivot; 
+  const float scale = pivot / powf(-logf(1.0f - pivot), 1.0f / power);
+
+  for(size_t k = 0; k < (size_t)width * height; k++)
+  {
+    const float *inp = in + 4 * k;
+    float *outp = out + 4 * k;
+    for(int i = 0; i < 3; i++)
+    {
+      if (inp[i] > 0.0)
+        outp[i] = 1 - expf(-powf(inp[i] / scale, power));
+      else
+      {
+        outp[i] = 0.0;
+      }
+    } 
+    outp[3] = inp[3];
+  }
+}
 
 void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
              void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
@@ -1369,6 +1453,10 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   // are we doing exposure fusion?
   if(d->exposure_fusion)
     process_fusion(self, piece, ivoid, ovoid, roi_in, roi_out);
+  else if(d->response_method == DT_BASE_PARAMETRIC)
+    process_parametric(self, piece, ivoid, ovoid, roi_in, roi_out);
+  else if(d->response_method == DT_BASE_WEIBULL)
+    process_weibull(self, piece, ivoid, ovoid, roi_in, roi_out);
   else
     process_lut(self, piece, ivoid, ovoid, roi_in, roi_out);
 }
@@ -1379,10 +1467,18 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   dt_iop_basecurve_data_t *d = (dt_iop_basecurve_data_t *)(piece->data);
   dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)p1;
 
+  if((pipe->type & DT_DEV_PIXELPIPE_PREVIEW) == DT_DEV_PIXELPIPE_PREVIEW)
+    piece->request_histogram |= (DT_REQUEST_ON);
+  else
+    piece->request_histogram &= ~(DT_REQUEST_ON);
+
   d->exposure_fusion = p->exposure_fusion;
   d->exposure_stops = p->exposure_stops;
   d->exposure_bias = p->exposure_bias;
   d->preserve_colors = p->preserve_colors;
+  d->response_method = p->response_method;
+  d->pivot = p->pivot;
+  d->power = p->power;
 
   const int ch = 0;
   // take care of possible change of curve type or number of nodes (not yet implemented in UI)
@@ -1406,6 +1502,16 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
       dt_draw_curve_set_point(d->curve, k, p->basecurve[ch][k].x, p->basecurve[ch][k].y);
   }
   dt_draw_curve_calc_values(d->curve, 0.0f, 1.0f, 0x10000, NULL, d->table);
+  float curve_cumsum[0x10000];
+  curve_cumsum[0] = 0.0;
+  for (int k = 1; k < 0x10000; k++) {
+    curve_cumsum[k] = curve_cumsum[k - 1] + d->table[k];
+  }
+  for (int k = 0; k < 0x10000; k++) {
+    d->table[k] = curve_cumsum[k] / curve_cumsum[0xffff];
+  }
+
+  // Is this the point of calculating the lutcurve?
 
   // now the extrapolation stuff:
   const float xm = p->basecurve[0][p->basecurve_nodes[0] - 1].x;
@@ -1438,6 +1544,10 @@ void gui_update(struct dt_iop_module_t *self)
   dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self->params;
   dt_iop_basecurve_gui_data_t *g = (dt_iop_basecurve_gui_data_t *)self->gui_data;
   dt_bauhaus_combobox_set(g->cmb_preserve_colors, p->preserve_colors);
+  dt_bauhaus_combobox_set(g->cmb_response_method, p->response_method);
+  dt_bauhaus_slider_set(g->parametric_pivot, p->pivot);
+  dt_bauhaus_slider_set(g->parametric_power, p->power);
+
   dt_bauhaus_combobox_set(g->fusion, p->exposure_fusion);
 
   gtk_widget_set_visible(g->exposure_step, p->exposure_fusion != 0);
@@ -1450,19 +1560,19 @@ void gui_update(struct dt_iop_module_t *self)
   gtk_widget_queue_draw(self->widget);
 }
 
-static float eval_grey(float x)
-{
-  // "log base" is a combined scaling and offset change so that x->[0,1], with
-  // the left side of the histogram expanded (slider->right) or not (slider left, linear)
-  return x;
-}
-
 void init(dt_iop_module_t *module)
 {
   dt_iop_default_init(module);
   dt_iop_basecurve_params_t *d = module->default_params;
-  d->basecurve[0][1].x = d->basecurve[0][1].y = 1.0;
+
+  d->basecurve[0][0].x = 0.0;
+  d->basecurve[0][0].y = 0.5;
+  d->basecurve[0][1].x = 1.0;
+  d->basecurve[0][1].y = 0.5;
   d->basecurve_nodes[0] = 2;
+
+  module->request_histogram |= (DT_REQUEST_ON);
+  memcpy(module->params, module->default_params, sizeof(dt_iop_basecurve_params_t));
 }
 
 void init_global(dt_iop_module_so_t *module)
@@ -1649,16 +1759,44 @@ static gboolean dt_iop_basecurve_draw(GtkWidget *widget, cairo_t *crf, gpointer 
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(.4));
   cairo_set_source_rgb(cr, .1, .1, .1);
   if(c->loglogscale)
-    dt_draw_loglog_grid(cr, 4, 0, 0, width, height, c->loglogscale + 1.0f);
+    dt_draw_semilog_x_grid(cr, 4, 0, 0, width, height, c->loglogscale + 1.0f);
   else
     dt_draw_grid(cr, 4, 0, 0, width, height);
+
+  // draw histogram in background
+  // only if module is enabled
+  if(self->enabled)
+  {
+    int32_t ch = 0;
+    const gboolean is_linear = darktable.lib->proxy.histogram.is_linear;
+    const uint32_t *hist = self->histogram;
+    const float hist_max = is_linear ? self->histogram_max[ch] : logf(1.0 + self->histogram_max[ch]);
+
+    if(hist && hist_max > 0.0f)
+    {
+      cairo_save(cr);
+      cairo_scale(cr, width / 255.0, (height - DT_PIXEL_APPLY_DPI(5)) / hist_max);
+      cairo_move_to(cr, 0, height);
+      set_color(cr, darktable.bauhaus->inset_histogram);
+
+      if (c->loglogscale > 0.0f)
+      {
+        dt_draw_histogram_8_log_base(cr, hist, 4, ch, is_linear, c->loglogscale + 1.0f);
+      }
+      else
+      {
+        dt_draw_histogram_8(cr, hist, 4, ch, is_linear);
+      }
+      cairo_restore(cr);
+    }
+  }
 
   // draw nodes positions
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));
   cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
   for(int k = 0; k < nodes; k++)
   {
-    const float x = to_log(basecurve[k].x, c->loglogscale), y = to_log(basecurve[k].y, c->loglogscale);
+    const float x = to_log(basecurve[k].x, c->loglogscale), y = to_log(basecurve[k].y, 0);
     cairo_arc(cr, x * width, y * height, DT_PIXEL_APPLY_DPI(3), 0, 2. * M_PI);
     cairo_stroke(cr);
   }
@@ -1670,7 +1808,7 @@ static gboolean dt_iop_basecurve_draw(GtkWidget *widget, cairo_t *crf, gpointer 
   {
     cairo_set_source_rgb(cr, .9, .9, .9);
     const float x = to_log(basecurve[c->selected].x, c->loglogscale),
-                y = to_log(basecurve[c->selected].y, c->loglogscale);
+                y = to_log(basecurve[c->selected].y, 0);
     cairo_arc(cr, x * width, y * height, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI);
     cairo_stroke(cr);
   }
@@ -1679,20 +1817,20 @@ static gboolean dt_iop_basecurve_draw(GtkWidget *widget, cairo_t *crf, gpointer 
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));
   cairo_set_source_rgb(cr, .9, .9, .9);
   // cairo_set_line_cap  (cr, CAIRO_LINE_CAP_SQUARE);
-  cairo_move_to(cr, 0, height * to_log(c->draw_ys[0], c->loglogscale));
+  cairo_move_to(cr, 0, height * to_log(c->draw_ys[0], 0));
   for(int k = 1; k < DT_IOP_TONECURVE_RES; k++)
   {
     const float xx = k / (DT_IOP_TONECURVE_RES - 1.0f);
     if(xx > xm)
     {
       const float yy = dt_iop_eval_exp(unbounded_coeffs, xx);
-      const float x = to_log(xx, c->loglogscale), y = to_log(yy, c->loglogscale);
+      const float x = to_log(xx, c->loglogscale), y = to_log(yy, 0);
       cairo_line_to(cr, x * width, height * y);
     }
     else
     {
       const float yy = c->draw_ys[k];
-      const float x = to_log(xx, c->loglogscale), y = to_log(yy, c->loglogscale);
+      const float x = to_log(xx, c->loglogscale), y = to_log(yy, 0);
       cairo_line_to(cr, x * width, height * y);
     }
   }
@@ -1785,7 +1923,7 @@ static gboolean dt_iop_basecurve_motion_notify(GtkWidget *widget, GdkEventMotion
 
   const float mx = CLAMP(c->mouse_x, 0, width) / (float)width;
   const float my = 1.0f - CLAMP(c->mouse_y, 0, height) / (float)height;
-  const float linx = to_lin(mx, c->loglogscale), liny = to_lin(my, c->loglogscale);
+  const float linx = to_lin(mx, c->loglogscale), liny = to_lin(my, 0);
 
   if(event->state & GDK_BUTTON1_MASK)
   {
@@ -1794,12 +1932,12 @@ static gboolean dt_iop_basecurve_motion_notify(GtkWidget *widget, GdkEventMotion
     {
       // this is used to translate mause position in loglogscale to make this behavior unified with linear scale.
       const float translate_mouse_x = old_m_x / width - to_log(basecurve[c->selected].x, c->loglogscale);
-      const float translate_mouse_y = 1 - old_m_y / height - to_log(basecurve[c->selected].y, c->loglogscale);
+      const float translate_mouse_y = 1 - old_m_y / height - to_log(basecurve[c->selected].y, 0);
       // dx & dy are in linear coordinates
       const float dx = to_lin(c->mouse_x / width - translate_mouse_x, c->loglogscale)
                        - to_lin(old_m_x / width - translate_mouse_x, c->loglogscale);
-      const float dy = to_lin(1 - c->mouse_y / height - translate_mouse_y, c->loglogscale)
-                       - to_lin(1 - old_m_y / height - translate_mouse_y, c->loglogscale);
+      const float dy = to_lin(1 - c->mouse_y / height - translate_mouse_y, 0)
+                       - to_lin(1 - old_m_y / height - translate_mouse_y, 0);
 
       return _move_point_internal(self, widget, dx, dy, event->state);
     }
@@ -1819,7 +1957,7 @@ static gboolean dt_iop_basecurve_motion_notify(GtkWidget *widget, GdkEventMotion
     for(int k = 0; k < nodes; k++)
     {
       float dist
-          = (my - to_log(basecurve[k].y, c->loglogscale)) * (my - to_log(basecurve[k].y, c->loglogscale))
+          = (my - to_log(basecurve[k].y, 0)) * (my - to_log(basecurve[k].y, 0))
             + (mx - to_log(basecurve[k].x, c->loglogscale)) * (mx - to_log(basecurve[k].x, c->loglogscale));
       if(dist < min)
       {
@@ -1895,7 +2033,7 @@ static gboolean dt_iop_basecurve_button_press(GtkWidget *widget, GdkEventButton 
           min *= min; // comparing against square
           for(int k = 0; k < nodes; k++)
           {
-            float other_y = to_log(basecurve[k].y, c->loglogscale);
+            float other_y = to_log(basecurve[k].y, 0);
             float dist = (y - other_y) * (y - other_y);
             if(dist < min) c->selected = selected;
           }
@@ -2078,7 +2216,19 @@ static void logbase_callback(GtkWidget *slider, gpointer user_data)
 {
   dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   dt_iop_basecurve_gui_data_t *g = (dt_iop_basecurve_gui_data_t *)self->gui_data;
-  g->loglogscale = eval_grey(dt_bauhaus_slider_get(g->logbase));
+  g->loglogscale = dt_bauhaus_slider_get(g->logbase);
+}
+
+static void interpolator_callback(GtkWidget *widget, dt_iop_module_t *self)
+{
+  if(darktable.gui->reset) return;
+  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self->params;
+  dt_iop_basecurve_gui_data_t *g = (dt_iop_basecurve_gui_data_t *)self->gui_data;
+  const int combo = dt_bauhaus_combobox_get(widget);
+  if(combo == 0) p->basecurve_type[0] = CUBIC_SPLINE;
+  if(combo == 1) p->basecurve_type[0] = CATMULL_ROM;
+  if(combo == 2) p->basecurve_type[0] = MONOTONE_HERMITE;
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
   gtk_widget_queue_draw(GTK_WIDGET(g->area));
 }
 
@@ -2103,8 +2253,43 @@ void gui_init(struct dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(GTK_WIDGET(c->area), _("abscissa: input, ordinate: output. works on RGB channels"));
 
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(c->area), TRUE, TRUE, 0);
+
+  /* From src/common/curve_tools.h :
+    #define CUBIC_SPLINE 0
+    #define CATMULL_ROM 1
+    #define MONOTONE_HERMITE 2
+  */
+  c->interpolator = dt_bauhaus_combobox_new(self);
+  dt_bauhaus_widget_set_label(c->interpolator, NULL, _("interpolation method"));
+  dt_bauhaus_combobox_add(c->interpolator, _("cubic spline"));
+  dt_bauhaus_combobox_add(c->interpolator, _("centripetal spline"));
+  dt_bauhaus_combobox_add(c->interpolator, _("monotonic spline"));
+  gtk_box_pack_start(GTK_BOX(self->widget), c->interpolator , TRUE, TRUE, 0);
+  gtk_widget_set_tooltip_text(c->interpolator, _("change this method if you see oscillations or cusps in the curve\n"
+                                                 "- cubic spline is better to produce smooth curves but oscillates when nodes are too close\n"
+                                                 "- centripetal is better to avoids cusps and oscillations with close nodes but is less smooth\n"
+                                                 "- monotonic is better for accuracy of pure analytical functions (log, gamma, exp)\n"));
+  g_signal_connect(G_OBJECT(c->interpolator), "value-changed", G_CALLBACK(interpolator_callback), self);
+
+  /*
+  c->scale = dt_bauhaus_combobox_new(self);
+  dt_bauhaus_widget_set_label(c->scale, NULL, _("scale"));
+  dt_bauhaus_combobox_add(c->scale, _("linear"));
+  dt_bauhaus_combobox_add(c->scale, _("logarithmic"));
+  gtk_widget_set_tooltip_text(c->scale, _("scale to use in the graph. use logarithmic scale for "
+                                          "more precise control near the blacks"));
+  gtk_box_pack_start(GTK_BOX(self->widget), c->scale, TRUE, TRUE, 0);
+  g_signal_connect(G_OBJECT(c->scale), "value-changed", G_CALLBACK(scale_callback), self);
+  */
+
   c->cmb_preserve_colors = dt_bauhaus_combobox_from_params(self, "preserve_colors");
   gtk_widget_set_tooltip_text(c->cmb_preserve_colors, _("method to preserve colors when applying contrast"));
+
+  c->cmb_response_method = dt_bauhaus_combobox_from_params(self, "response_method");
+  gtk_widget_set_tooltip_text(c->cmb_response_method, _("method for defining the response curve"));
+
+  c->parametric_pivot = dt_bauhaus_slider_from_params(self, "pivot");
+  c->parametric_power = dt_bauhaus_slider_from_params(self, "power");
 
   c->fusion = dt_bauhaus_combobox_from_params(self, "exposure_fusion");
   dt_bauhaus_combobox_add(c->fusion, _("none"));
@@ -2128,6 +2313,7 @@ void gui_init(struct dt_iop_module_t *self)
                                                   "(-1: reduce highlight, +1: reduce shadows)"));
   gtk_widget_set_no_show_all(c->exposure_bias, TRUE);
   gtk_widget_set_visible(c->exposure_bias, p->exposure_fusion != 0 ? TRUE : FALSE);
+
   c->logbase = dt_bauhaus_slider_new_with_range(self, 0.0f, 40.0f, 0.5f, 0.0f, 2);
   dt_bauhaus_widget_set_label(c->logbase, NULL, _("scale for graph"));
   gtk_box_pack_start(GTK_BOX(self->widget), c->logbase , TRUE, TRUE, 0);  g_signal_connect(G_OBJECT(c->logbase), "value-changed", G_CALLBACK(logbase_callback), self);
