@@ -1391,7 +1391,7 @@ static void dt_interpolation_resample_plain(const struct dt_interpolation *itor,
       // Negative RGB are invalid values no matter the RGB space (light is positive)
       dt_aligned_pixel_t pixel;
       for_each_channel(c, aligned(vs:16))
-        pixel[c] = MAX(vs[c], 0.f);
+        pixel[c] = vs[c];
       copy_pixel_nontemporal(out + baseidx, pixel);
 
       // Reset vertical resampling context
