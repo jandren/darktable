@@ -24,8 +24,10 @@
 #include "common/colorspaces_inline_conversions.h"
 #include "common/dttypes.h"
 #include "common/file_location.h"
+#include "common/guard_rail.h"
 #include "common/imagebuf.h"
 #include "common/iop_profile.h"
+#include "common/matrices.h"
 #include "common/opencl.h"
 #include "control/conf.h"
 #include "control/control.h"
@@ -298,6 +300,8 @@ static float _lerp_lut(const float *const lut, const float v)
 int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,
                const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
+  if(1) return 0;
+
   dt_iop_colorout_data_t *d = (dt_iop_colorout_data_t *)piece->data;
   dt_iop_colorout_global_data_t *gd = (dt_iop_colorout_global_data_t *)self->global_data;
   cl_mem dev_m = NULL, dev_r = NULL, dev_g = NULL, dev_b = NULL, dev_coeffs = NULL;
@@ -408,7 +412,8 @@ static void process_fastpath_apply_tonecurves(struct dt_iop_module_t *self,
 static void _transform_cmatrix_linear(const dt_iop_colorout_data_t *const d,
                                float *restrict out,
                                const float *restrict in,
-                               const size_t npixels)
+                               const size_t npixels,
+                               const dt_iop_order_iccprofile_info_t *rec2020_profile)
 {
   dt_colormatrix_t cmatrix;
   transpose_3xSSE(d->cmatrix, cmatrix);
@@ -416,8 +421,17 @@ static void _transform_cmatrix_linear(const dt_iop_colorout_data_t *const d,
   copy_pixel(cmatrix_0,cmatrix[0]);
   copy_pixel(cmatrix_1,cmatrix[1]);
   copy_pixel(cmatrix_2,cmatrix[2]);
+
+  dt_colormatrix_t output_to_rec2020, output_to_xyz;
+  mat3SSEinv(output_to_xyz, cmatrix);
+  dt_colormatrix_mul(output_to_rec2020, output_to_xyz, rec2020_profile->matrix_out_transposed);
+
+  const dt_aligned_pixel_t rec2020_luminance_coeffs_cie2012 = { 2.59384909e-01f, 6.07920360e-01f, 1.32694731e-01f, 0.f };
+  dt_aligned_pixel_t luminance_coeffs_cie2012 = { 0.f };
+  for_each_channel(c) luminance_coeffs_cie2012[c] = scalar_product(rec2020_luminance_coeffs_cie2012, output_to_rec2020[c]);
+
 #pragma omp parallel for default(none) \
-  dt_omp_firstprivate(in, out, npixels, cmatrix_0, cmatrix_1, cmatrix_2, d)       \
+  dt_omp_firstprivate(in, out, npixels, cmatrix_0, cmatrix_1, cmatrix_2, d, luminance_coeffs_cie2012)  \
   schedule(simd:static)
   for(size_t k = 0; k < npixels; k++)
   {
@@ -430,7 +444,11 @@ static void _transform_cmatrix_linear(const dt_iop_colorout_data_t *const d,
     dt_aligned_pixel_t rgb;
     for_each_channel(r)
       rgb[r] = cmatrix_0[r] * XYZ[0] + cmatrix_1[r] * XYZ[1] + cmatrix_2[r] * XYZ[2];
-    copy_pixel_nontemporal(out + 4*k, rgb);
+
+    dt_aligned_pixel_t rgb_no_negatives, rgb_high_side_corrected;
+    compensate_negative_RGB_at_constant_luminance(luminance_coeffs_cie2012, rgb, rgb_no_negatives);
+    compensate_high_RGB_values(1.f, 1.f, luminance_coeffs_cie2012, rgb_no_negatives, rgb_high_side_corrected);
+    copy_pixel(out + 4*k, rgb_high_side_corrected);
   }
   dt_omploop_sfence();
 }
@@ -480,13 +498,14 @@ static void _transform_cmatrix_tonecurve(const dt_iop_colorout_data_t *const d,
 static int _transform_cmatrix(const dt_iop_colorout_data_t *const d,
                                float *restrict out,
                                const float *restrict in,
-                               const size_t npixels)
+                               const size_t npixels,
+                               const dt_iop_order_iccprofile_info_t *rec2020_profile)
 {
   const gboolean is_linear = (d->lut[0][0] < 0.0f) || (d->lut[1][0] < 0.0f) || (d->lut[2][0] < 0.0f);
 //  const gboolean all_nonlin = (d->lut[0][0] >= 0.0f) || (d->lut[1][0] >= 0.0f) || (d->lut[2][0] >= 0.0f);
   if(is_linear || 1) //TODO: integrate tonecurve in same pass as color matrix without major speed penalty
   {
-    _transform_cmatrix_linear(d, out, in, npixels);
+    _transform_cmatrix_linear(d, out, in, npixels, rec2020_profile);
   }
   else
   {
@@ -543,13 +562,15 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   const size_t npixels = width * height;
   float *const restrict out = (float *)ovoid;
 
+  const dt_iop_order_iccprofile_info_t *rec2020_profile = dt_ioppr_add_profile_info_to_list(self->dev, DT_COLORSPACE_LIN_REC2020, "", DT_INTENT_RELATIVE_COLORIMETRIC);
+
   if(d->type == DT_COLORSPACE_LAB)
   {
     dt_iop_image_copy_by_size(ovoid, ivoid, roi_out->width, roi_out->height, piece->colors);
   }
   else if(!isnan(d->cmatrix[0][0]))
   {
-    if (!_transform_cmatrix(d, out, (float*)ivoid, npixels))
+    if (!_transform_cmatrix(d, out, (float*)ivoid, npixels, rec2020_profile))
       process_fastpath_apply_tonecurves(self, piece, ovoid, roi_out);
   }
   else
