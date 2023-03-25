@@ -486,6 +486,8 @@ int process_cl(struct dt_iop_module_t *self,
   const dt_iop_sigmoid_data_t *const d = (dt_iop_sigmoid_data_t *)piece->data;
   dt_iop_sigmoid_global_data_t *const gd = (dt_iop_sigmoid_global_data_t *)self->global_data;
 
+  if (d->color_processing == DT_SIGMOID_METHOD_PER_CHANNEL) return FALSE;
+
   cl_int err = DT_OPENCL_DEFAULT_ERROR;
   const int devid = piece->pipe->devid;
   const int width = roi_in->width;
