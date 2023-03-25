@@ -20,7 +20,10 @@
 #endif
 
 #include "bauhaus/bauhaus.h"
+#include "common/custom_primaries.h"
+#include "common/guard_rail.h"
 #include "common/math.h"
+#include "common/matrices.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/openmp_maths.h"
@@ -31,7 +34,7 @@
 #include <gtk/gtk.h>
 #include <stdlib.h>
 
-DT_MODULE_INTROSPECTION(1, dt_iop_sigmoid_params_t)
+DT_MODULE_INTROSPECTION(2, dt_iop_sigmoid_params_t)
 
 
 #define MIDDLE_GREY 0.1845f
@@ -52,7 +55,45 @@ typedef struct dt_iop_sigmoid_params_t
   float display_black_target;  // $MIN: 0.0  $MAX: 15.0 $DEFAULT: 0.0152 $DESCRIPTION: "target black"
   dt_iop_sigmoid_methods_type_t color_processing;  // $DEFAULT: DT_SIGMOID_METHOD_PER_CHANNEL $DESCRIPTION: "color processing"
   float hue_preservation;                          // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 100.0 $DESCRIPTION: "preserve hue"
+  float red_inset;        // $MIN: 0.0 $MAX: 50.0 $DEFAULT: 0.0 $DESCRIPTION: "red inset"
+  float green_inset;      // $MIN: 0.0 $MAX: 50.0 $DEFAULT: 0.0 $DESCRIPTION: "green inset"
+  float blue_inset;       // $MIN: 0.0 $MAX: 50.0 $DEFAULT: 0.0 $DESCRIPTION: "blue inset"
+  float red_rotation;     // $MIN: -15.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "red rotation"
+  float green_rotation;   // $MIN: -15.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "green rotation"
+  float blue_rotation;    // $MIN: -15.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
 } dt_iop_sigmoid_params_t;
+
+int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version, void *new_params,
+                  const int new_version)
+{
+  if(old_version == 1 && new_version == 2)
+  {
+    typedef struct dt_iop_sigmoid_params_v1_t
+    {
+      float middle_grey_contrast;  // $MIN: 0.1  $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "contrast"
+      float contrast_skewness;     // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "skew"
+      float display_white_target;  // $MIN: 20.0  $MAX: 1600.0 $DEFAULT: 100.0 $DESCRIPTION: "target white"
+      float display_black_target;  // $MIN: 0.0  $MAX: 15.0 $DEFAULT: 0.0152 $DESCRIPTION: "target black"
+      dt_iop_sigmoid_methods_type_t color_processing;  // $DEFAULT: DT_SIGMOID_METHOD_PER_CHANNEL $DESCRIPTION: "color processing"
+      float hue_preservation;                          // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 100.0 $DESCRIPTION: "preserve hue"
+    } dt_iop_sigmoid_params_v1_t;
+
+    // Copy the common part of the params struct
+    memcpy(new_params, old_params, sizeof(dt_iop_sigmoid_params_v1_t));
+
+    dt_iop_sigmoid_params_t *n = (dt_iop_sigmoid_params_t *)new_params;
+    n->red_inset = 0.f;
+    n->red_rotation = 0.f;
+    n->green_inset = 0.f;
+    n->green_rotation = 0.f;
+    n->blue_inset = 0.f;
+    n->blue_rotation = 0.f;
+
+    return 0;
+  }
+
+  return 1;
+}
 
 typedef struct dt_iop_sigmoid_data_t
 {
@@ -64,6 +105,8 @@ typedef struct dt_iop_sigmoid_data_t
   float paper_power;
   dt_iop_sigmoid_methods_type_t color_processing;
   float hue_preservation;
+  float primaries_scaling[3];
+  float primaries_rotation[3];
 } dt_iop_sigmoid_data_t;
 
 typedef struct dt_iop_sigmoid_gui_data_t
@@ -71,7 +114,10 @@ typedef struct dt_iop_sigmoid_gui_data_t
   GtkWidget *contrast_slider, *skewness_slider, *color_processing_list, *hue_preservation_slider,
       *display_black_slider, *display_white_slider;
 
-  dt_gui_collapsible_section_t cs;
+  GtkWidget *red_inset_slider, *green_inset_slider, *blue_inset_slider,
+      *red_rotation_slider, *green_rotation_slider, *blue_rotation_slider;
+
+  dt_gui_collapsible_section_t display_luminance_section, primaries_section;
 
 } dt_iop_sigmoid_gui_data_t;
 
@@ -120,7 +166,7 @@ int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_p
 
 void init_presets(dt_iop_module_so_t *self)
 {
-  dt_iop_sigmoid_params_t p;
+  dt_iop_sigmoid_params_t p = { 0 };
   p.display_white_target = 100.0f;
   p.display_black_target = 0.0152f;
   p.color_processing = DT_SIGMOID_METHOD_PER_CHANNEL;
@@ -139,6 +185,18 @@ void init_presets(dt_iop_module_so_t *self)
   p.contrast_skewness = 0.0f;
   p.color_processing = DT_SIGMOID_METHOD_RGB_RATIO;
   dt_gui_presets_add_generic(_("reinhard"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  p.middle_grey_contrast = 1.5f;
+  p.contrast_skewness = 0.0f;
+  p.color_processing = DT_SIGMOID_METHOD_PER_CHANNEL;
+  p.hue_preservation = 0.0f;
+  p.red_inset = 20.f;
+  p.green_inset = 20.f;
+  p.blue_inset = 20.f;
+  p.red_rotation = 6.f;
+  p.green_rotation = 2.f;
+  p.blue_rotation = -6.f;
+  dt_gui_presets_add_generic(_("AgX"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
 // Declared here as it is used in the commit params function
@@ -206,6 +264,49 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 
   module_data->color_processing = params->color_processing;
   module_data->hue_preservation = fminf(fmaxf(0.01f * params->hue_preservation, 0.0f), 1.0f);
+
+  module_data->primaries_scaling[0] = 1.f - 0.01f * params->red_inset;
+  module_data->primaries_scaling[1] = 1.f - 0.01f * params->green_inset;
+  module_data->primaries_scaling[2] = 1.f - 0.01f * params->blue_inset;
+  const float DEG_TO_RAD = DT_M_PI_F / 180.f;
+  module_data->primaries_rotation[0] = DEG_TO_RAD * params->red_rotation;
+  module_data->primaries_rotation[1] = DEG_TO_RAD * params->green_rotation;
+  module_data->primaries_rotation[2] = DEG_TO_RAD * params->blue_rotation;
+}
+
+static void calculate_adjusted_primaries(const dt_iop_sigmoid_data_t *const module_data,
+                                         const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
+                                         dt_colormatrix_t pipe_to_rendering, dt_colormatrix_t rendering_to_pipe,
+                                         dt_aligned_pixel_t pipe_luminance_coeffs)
+{
+  // Make adjusted primaries for generating the inset matrix
+  //
+  // References:
+  // AgX by Troy Sobotka - https://github.com/sobotka/AgX-S2O3
+  // Related discussions on Blender Artists forums - https://blenderartists.org/t/feedback-development-filmic-baby-step-to-a-v2/1361663
+  //
+  // The idea is to "inset" the work RGB data toward achromatic
+  // along spectral lines before per-channel curves. This makes
+  // handling of bright, saturated colors much better as the
+  // per-channel process desaturates them.
+  // The primaries are also rotated to compensate for Abney etc.
+  // and achieve a favourable shift towards yellow.
+  //
+  // Note: this is done a bit counterintuitively:
+  // the input RGB (Rec.2020) is reinterpreted as the inset,
+  // less pure primaries and then projected to Rec.2020.
+  // It is done this way to avoid any possible calculation errors
+  // in the xyY <-> XYZ conversions in case the xy chromaticity crosses
+  // any of the triangular boundaries.
+  float custom_primaries[3][2];
+  dt_make_custom_primaries(pipe_work_profile, module_data->primaries_scaling, module_data->primaries_rotation, custom_primaries);
+
+  dt_colormatrix_t custom_to_XYZ;
+  dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, pipe_work_profile->whitepoint, custom_to_XYZ);
+  dt_colormatrix_mul(pipe_to_rendering, custom_to_XYZ, pipe_work_profile->matrix_out_transposed);
+  mat3SSEinv(rendering_to_pipe, pipe_to_rendering);
+
+  for_four_channels(c) pipe_luminance_coeffs[c] = pipe_work_profile->matrix_in[1][c];
 }
 
 #ifdef _OPENMP
@@ -417,9 +518,15 @@ void process_loglogistic_per_channel_interpolated(dt_dev_pixelpipe_iop_t *piece,
   const float skew_power = module_data->paper_power;
   const float hue_preservation = module_data->hue_preservation;
 
+  const dt_iop_order_iccprofile_info_t *pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+  dt_colormatrix_t pipe_to_rendering, rendering_to_pipe;
+  dt_aligned_pixel_t pipe_luminance_coeffs;
+  calculate_adjusted_primaries(module_data, pipe_work_profile, pipe_to_rendering, rendering_to_pipe, pipe_luminance_coeffs);
+
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
-  dt_omp_firstprivate(npixels, white_target, paper_exp, film_fog, contrast_power, skew_power, hue_preservation) \
+  dt_omp_firstprivate(npixels, white_target, paper_exp, film_fog, contrast_power, skew_power, hue_preservation, \
+                      pipe_to_rendering, rendering_to_pipe, pipe_luminance_coeffs) \
   dt_omp_sharedconst(in, out) \
   schedule(static)
 #endif
@@ -433,15 +540,24 @@ void process_loglogistic_per_channel_interpolated(dt_dev_pixelpipe_iop_t *piece,
     // Force negative values to zero
     desaturate_negative_values(pix_in, pix_in_strict_positive);
 
-    for_each_channel(c, aligned(pix_in_strict_positive, per_channel))
+    dt_aligned_pixel_t rendering_RGB;
+    dt_apply_transposed_color_matrix(pix_in_strict_positive, pipe_to_rendering, rendering_RGB);
+
+    for_each_channel(c, aligned(rendering_RGB, per_channel))
     {
-      per_channel[c] = generalized_loglogistic_sigmoid(pix_in_strict_positive[c], white_target, paper_exp, film_fog, contrast_power, skew_power);
+      per_channel[c] = generalized_loglogistic_sigmoid(rendering_RGB[c], white_target, paper_exp, film_fog, contrast_power, skew_power);
     }
 
     // Hue correction by scaling the middle value relative to the max and min values.
     dt_iop_sigmoid_value_order_t pixel_value_order;
-    pixel_channel_order(pix_in_strict_positive, &pixel_value_order);
-    preserve_hue_and_energy(pix_in_strict_positive, per_channel, pix_out, pixel_value_order, hue_preservation);
+    dt_aligned_pixel_t per_channel_hue_corrected;
+    pixel_channel_order(rendering_RGB, &pixel_value_order);
+    preserve_hue_and_energy(rendering_RGB, per_channel, per_channel_hue_corrected, pixel_value_order, hue_preservation);
+
+    dt_aligned_pixel_t pipe_RGB, pipe_RGB_no_negatives;
+    dt_apply_transposed_color_matrix(per_channel_hue_corrected, rendering_to_pipe, pipe_RGB);
+    desaturate_negative_values(pipe_RGB, pipe_RGB_no_negatives);
+    compensate_high_RGB_values(white_target, 1.f, pipe_luminance_coeffs, pipe_RGB_no_negatives, pix_out);
 
     // Copy over the alpha channel
     pix_out[3] = pix_in[3];
@@ -568,10 +684,36 @@ void gui_update(dt_iop_module_t *self)
   dt_bauhaus_slider_set(g->display_black_slider, p->display_black_target);
   dt_bauhaus_slider_set(g->display_white_slider, p->display_white_target);
 
+  dt_bauhaus_slider_set(g->red_inset_slider, p->red_inset);
+  dt_bauhaus_slider_set(g->red_rotation_slider, p->red_rotation);
+  dt_bauhaus_slider_set(g->green_inset_slider, p->green_inset);
+  dt_bauhaus_slider_set(g->green_rotation_slider, p->green_rotation);
+  dt_bauhaus_slider_set(g->blue_inset_slider, p->blue_inset);
+  dt_bauhaus_slider_set(g->blue_rotation_slider, p->blue_rotation);
+
   dt_bauhaus_combobox_set_from_value(g->color_processing_list, p->color_processing);
-  dt_gui_update_collapsible_section(&g->cs);
+  dt_gui_update_collapsible_section(&g->display_luminance_section);
+  dt_gui_update_collapsible_section(&g->primaries_section);
 
   gui_changed(self, NULL, NULL);
+}
+
+static GtkWidget *setup_inset_slider(dt_iop_module_t *self, const char *param_name, const char *tooltip)
+{
+  GtkWidget *slider = dt_bauhaus_slider_from_params(self, param_name);
+  dt_bauhaus_slider_set_digits(slider, 3);
+  dt_bauhaus_slider_set_format(slider, "%");
+  gtk_widget_set_tooltip_text(slider, tooltip);
+  return slider;
+}
+
+static GtkWidget *setup_rotation_slider(dt_iop_module_t *self, const char *param_name, const char *tooltip)
+{
+  GtkWidget *slider = dt_bauhaus_slider_from_params(self, param_name);
+  dt_bauhaus_slider_set_digits(slider, 3);
+  dt_bauhaus_slider_set_format(slider, "°");
+  gtk_widget_set_tooltip_text(slider, tooltip);
+  return slider;
 }
 
 void gui_init(dt_iop_module_t *self)
@@ -598,17 +740,38 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->hue_preservation_slider, _("optional correction of the hue twist introduced by\n"
                                                             "the per-channel processing method."));
 
-  // collapsible section
+  GtkWidget *main_box = self->widget;
+
+  // primaries collapsible section
   dt_gui_new_collapsible_section
-    (&g->cs,
+    (&g->primaries_section,
+     "plugins/darkroom/sigmoid/expand_primaries",
+     _("primaries"),
+     GTK_BOX(main_box),
+     DT_ACTION(self));
+  gtk_widget_set_tooltip_text(g->primaries_section.expander,
+                                _("set custom primaries"));
+
+  self->widget = GTK_WIDGET(g->primaries_section.container);
+
+  g->red_inset_slider = setup_inset_slider(self, "red_inset", _("red primary inset"));
+  g->red_rotation_slider = setup_rotation_slider(self, "red_rotation", _("red primary rotation"));
+  g->green_inset_slider = setup_inset_slider(self, "green_inset", _("green primary inset"));
+  g->green_rotation_slider = setup_rotation_slider(self, "green_rotation", _("green primary rotation"));
+  g->blue_inset_slider = setup_inset_slider(self, "blue_inset", _("blue primary inset"));
+  g->blue_rotation_slider = setup_rotation_slider(self, "blue_rotation", _("blue primary rotation"));
+
+  // display luminance section
+  dt_gui_new_collapsible_section
+    (&g->display_luminance_section,
      "plugins/darkroom/sigmoid/expand_values",
      _("display luminance"),
-     GTK_BOX(self->widget),
+     GTK_BOX(main_box),
      DT_ACTION(self));
-  gtk_widget_set_tooltip_text(g->cs.expander,
+  gtk_widget_set_tooltip_text(g->display_luminance_section.expander,
                                 _("set display black/white targets"));
-  GtkWidget *main_box = self->widget;
-  self->widget = GTK_WIDGET(g->cs.container);
+
+  self->widget = GTK_WIDGET(g->display_luminance_section.container);
 
   g->display_black_slider = dt_bauhaus_slider_from_params(self, "display_black_target");
   dt_bauhaus_slider_set_soft_range(g->display_black_slider, 0.0f, 1.0f);
@@ -621,6 +784,7 @@ void gui_init(dt_iop_module_t *self)
   dt_bauhaus_slider_set_format(g->display_white_slider, "%");
   gtk_widget_set_tooltip_text(g->display_white_slider, _("the white luminance of the target display or print.\n"
                                                          "can be used creatively for a faded look or blowing out whites earlier."));
+
   self->widget = main_box;
 }
 
