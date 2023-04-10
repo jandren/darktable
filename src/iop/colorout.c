@@ -445,10 +445,9 @@ static void _transform_cmatrix_linear(const dt_iop_colorout_data_t *const d,
     for_each_channel(r)
       rgb[r] = cmatrix_0[r] * XYZ[0] + cmatrix_1[r] * XYZ[1] + cmatrix_2[r] * XYZ[2];
 
-    dt_aligned_pixel_t rgb_no_negatives, rgb_high_side_corrected;
+    dt_aligned_pixel_t rgb_no_negatives;
     compensate_negative_RGB_at_constant_luminance(luminance_coeffs_cie2012, rgb, rgb_no_negatives);
-    compensate_high_RGB_values(1.f, 1.f, luminance_coeffs_cie2012, rgb_no_negatives, rgb_high_side_corrected);
-    copy_pixel(out + 4*k, rgb_high_side_corrected);
+    copy_pixel(out + 4*k, rgb_no_negatives);
   }
   dt_omploop_sfence();
 }
