@@ -61,6 +61,7 @@ typedef struct dt_iop_sigmoid_params_t
   float red_rotation;     // $MIN: -15.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "red rotation"
   float green_rotation;   // $MIN: -15.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "green rotation"
   float blue_rotation;    // $MIN: -15.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
+  float gamut_smoothness; // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "gamut smoothness"
 } dt_iop_sigmoid_params_t;
 
 int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version, void *new_params,
@@ -88,7 +89,7 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
     n->green_rotation = 0.f;
     n->blue_inset = 0.f;
     n->blue_rotation = 0.f;
-
+    n->gamut_smoothness = 0.f;
     return 0;
   }
 
@@ -107,12 +108,13 @@ typedef struct dt_iop_sigmoid_data_t
   float hue_preservation;
   float primaries_scaling[3];
   float primaries_rotation[3];
+  float linear_segment;
 } dt_iop_sigmoid_data_t;
 
 typedef struct dt_iop_sigmoid_gui_data_t
 {
   GtkWidget *contrast_slider, *skewness_slider, *color_processing_list, *hue_preservation_slider,
-      *display_black_slider, *display_white_slider;
+      *display_black_slider, *display_white_slider, *gamut_smoothness_slider;
 
   GtkWidget *red_inset_slider, *green_inset_slider, *blue_inset_slider,
       *red_rotation_slider, *green_rotation_slider, *blue_rotation_slider;
@@ -272,6 +274,8 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   module_data->primaries_rotation[0] = DEG_TO_RAD * params->red_rotation;
   module_data->primaries_rotation[1] = DEG_TO_RAD * params->green_rotation;
   module_data->primaries_rotation[2] = DEG_TO_RAD * params->blue_rotation;
+
+  module_data->linear_segment = fmaxf(1.f - params->gamut_smoothness / 100.f, 0.f);
 }
 
 static void calculate_adjusted_primaries(const dt_iop_sigmoid_data_t *const module_data,
@@ -317,6 +321,39 @@ static inline void desaturate_negative_values(const dt_aligned_pixel_t pix_in, d
   const float pixel_average = fmaxf((pix_in[0] + pix_in[1] + pix_in[2]) / 3.0f, 0.0f);
   const float min_value = fminf(fminf(pix_in[0], pix_in[1]), pix_in[2]);
   const float saturation_factor = min_value < 0.0f ? -pixel_average / (min_value - pixel_average) : 1.0f;
+  for_each_channel(c, aligned(pix_in, pix_out))
+  {
+    pix_out[c] = pixel_average + saturation_factor * (pix_in[c] - pixel_average);
+  }
+}
+
+#ifdef _OPENMP
+#pragma omp declare simd
+#endif
+static inline float compression_sigmoid(const float value, const float linear_segment)
+{
+  if (linear_segment == 1.0f)
+  {
+    return fminf(value, 1.0f);
+  }
+  const float compression_segment = (1.0f - linear_segment);
+  const float normalized = (value - linear_segment) / compression_segment;
+  const float compressed = normalized / sqrtf(1.0f + normalized * normalized);
+  return linear_segment + compressed * compression_segment;
+}
+
+#ifdef _OPENMP
+#pragma omp declare simd
+#endif
+static inline void compress_negative_values(const dt_aligned_pixel_t pix_in, dt_aligned_pixel_t pix_out, float linear_segment)
+{
+  const float pixel_average = fmaxf((pix_in[0] + pix_in[1] + pix_in[2]) / 3.0f, 0.0f);
+  const float min_value = fminf(fminf(pix_in[0], pix_in[1]), pix_in[2]);
+
+  const float saturation = fabsf((min_value - pixel_average) / pixel_average);
+  const float compressed_saturation = saturation > linear_segment ? compression_sigmoid(saturation, linear_segment) : saturation;
+
+  const float saturation_factor = compressed_saturation / saturation;
   for_each_channel(c, aligned(pix_in, pix_out))
   {
     pix_out[c] = pixel_average + saturation_factor * (pix_in[c] - pixel_average);
@@ -517,6 +554,7 @@ void process_loglogistic_per_channel_interpolated(dt_dev_pixelpipe_iop_t *piece,
   const float contrast_power = module_data->film_power;
   const float skew_power = module_data->paper_power;
   const float hue_preservation = module_data->hue_preservation;
+  const float linear_segment = module_data->linear_segment;
 
   const dt_iop_order_iccprofile_info_t *pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   dt_colormatrix_t pipe_to_rendering, rendering_to_pipe;
@@ -526,7 +564,7 @@ void process_loglogistic_per_channel_interpolated(dt_dev_pixelpipe_iop_t *piece,
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
   dt_omp_firstprivate(npixels, white_target, paper_exp, film_fog, contrast_power, skew_power, hue_preservation, \
-                      pipe_to_rendering, rendering_to_pipe, pipe_luminance_coeffs) \
+                      pipe_to_rendering, rendering_to_pipe, pipe_luminance_coeffs, linear_segment) \
   dt_omp_sharedconst(in, out) \
   schedule(static)
 #endif
@@ -538,7 +576,8 @@ void process_loglogistic_per_channel_interpolated(dt_dev_pixelpipe_iop_t *piece,
     dt_aligned_pixel_t per_channel;
 
     // Force negative values to zero
-    desaturate_negative_values(pix_in, pix_in_strict_positive);
+    // desaturate_negative_values(pix_in, pix_in_strict_positive);
+    compress_negative_values(pix_in, pix_in_strict_positive, linear_segment);
 
     dt_aligned_pixel_t rendering_RGB;
     dt_apply_transposed_color_matrix(pix_in_strict_positive, pipe_to_rendering, rendering_RGB);
@@ -557,7 +596,12 @@ void process_loglogistic_per_channel_interpolated(dt_dev_pixelpipe_iop_t *piece,
     dt_aligned_pixel_t pipe_RGB, pipe_RGB_no_negatives;
     dt_apply_transposed_color_matrix(per_channel_hue_corrected, rendering_to_pipe, pipe_RGB);
     desaturate_negative_values(pipe_RGB, pipe_RGB_no_negatives);
-    compensate_high_RGB_values(white_target, 1.f, pipe_luminance_coeffs, pipe_RGB_no_negatives, pix_out);
+    // compensate_high_RGB_values(white_target, 1.f, pipe_luminance_coeffs, pipe_RGB_no_negatives, pix_out);
+
+    for_each_channel(c, aligned(pipe_RGB_no_negatives, pix_out))
+    {
+      pix_out[c] = pipe_RGB_no_negatives[c];
+    }
 
     // Copy over the alpha channel
     pix_out[3] = pix_in[3];
@@ -691,6 +735,8 @@ void gui_update(dt_iop_module_t *self)
   dt_bauhaus_slider_set(g->blue_inset_slider, p->blue_inset);
   dt_bauhaus_slider_set(g->blue_rotation_slider, p->blue_rotation);
 
+  dt_bauhaus_slider_set(g->gamut_smoothness_slider, p->gamut_smoothness);
+
   dt_bauhaus_combobox_set_from_value(g->color_processing_list, p->color_processing);
   dt_gui_update_collapsible_section(&g->display_luminance_section);
   dt_gui_update_collapsible_section(&g->primaries_section);
@@ -760,6 +806,8 @@ void gui_init(dt_iop_module_t *self)
   g->green_rotation_slider = setup_rotation_slider(self, "green_rotation", _("green primary rotation"));
   g->blue_inset_slider = setup_inset_slider(self, "blue_inset", _("blue primary inset"));
   g->blue_rotation_slider = setup_rotation_slider(self, "blue_rotation", _("blue primary rotation"));
+
+  g->gamut_smoothness_slider = dt_bauhaus_slider_from_params(self, "gamut_smoothness");
 
   // display luminance section
   dt_gui_new_collapsible_section
