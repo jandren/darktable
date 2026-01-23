@@ -90,7 +90,12 @@ typedef enum dt_iop_local_contrast_rgb_filter_t
 typedef struct dt_iop_local_contrast_rgb_params_t
 {
   // Local contrast scaling factor
-  float detail_scale;   // $MIN: 0.0 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "detail boost"
+  float detail_red;     // $MIN: -3.0 $MAX: 3.0 $DEFAULT: 0.0 $DESCRIPTION: "red details"
+  float detail_green;   // $MIN: -3.0 $MAX: 3.0 $DEFAULT: 0.0 $DESCRIPTION: "green details"
+  float detail_blue;    // $MIN: -3.0 $MAX: 3.0 $DEFAULT: 0.0 $DESCRIPTION: "blue details"
+  float global_red;     // $MIN: -3.0 $MAX: 3.0 $DEFAULT: 0.0 $DESCRIPTION: "red contrast"
+  float global_green;   // $MIN: -3.0 $MAX: 3.0 $DEFAULT: 0.0 $DESCRIPTION: "green contrast"
+  float global_blue;    // $MIN: -3.0 $MAX: 3.0 $DEFAULT: 0.0 $DESCRIPTION: "blue contrast"
 
   // Masking parameters
   // Blending is log-encoded because changes in small values are more noticeable
@@ -105,7 +110,12 @@ typedef struct dt_iop_local_contrast_rgb_params_t
 
 typedef struct dt_iop_local_contrast_rgb_data_t
 {
-  float detail_scale;
+  float detail_red;
+  float detail_green;
+  float detail_blue;
+  float global_red;
+  float global_green;
+  float global_blue;
   float blending, feathering;
   float scale;
   int radius;
@@ -147,7 +157,12 @@ typedef struct dt_iop_local_contrast_rgb_gui_data_t
   gboolean luminance_valid;
 
   // GTK widgets
-  GtkWidget *detail_scale;
+  GtkWidget *detail_red;
+  GtkWidget *detail_green;
+  GtkWidget *detail_blue;
+  GtkWidget *global_red;
+  GtkWidget *global_green;
+  GtkWidget *global_blue;
   GtkWidget *blending;
   GtkWidget *method;
   GtkWidget *details, *feathering, *iterations;
@@ -301,13 +316,24 @@ static inline void apply_local_contrast(const float *const restrict in,
                                         float *const restrict out,
                                         const dt_iop_roi_t *const roi_in,
                                         const dt_iop_roi_t *const roi_out,
-                                        const float detail_scale)
+                                        const float detail_red,
+                                        const float detail_green,
+                                        const float detail_blue,
+                                        const float global_red,
+                                        const float global_green,
+                                        const float global_blue)
 {
   const size_t npixels = (size_t)roi_in->width * roi_in->height;
 
   DT_OMP_FOR()
   for(size_t k = 0; k < npixels; k++)
   {
+    // Calculate color based detail and global contrast scales
+    const int s = 4 * k;
+    const float rgb_sum = fmaxf(in[s] + in[s + 1] + in[s + 2], MIN_FLOAT);
+    const float detail_scale = (detail_red * in[s] + detail_green * in[s + 1] + detail_blue * in[s + 2]) / rgb_sum;
+    const float global_scale = (global_red * in[s] + global_green * in[s + 1] + global_blue * in[s + 2]) / rgb_sum;
+
     // Detail in log space (EV): how much brighter/darker is this pixel
     // compared to its local neighborhood
     // detail = log2(pixel_lum / smoothed_lum) = log2(pixel_lum) - log2(smoothed_lum)
@@ -317,13 +343,16 @@ static inline void apply_local_contrast(const float *const restrict in,
 
     // Scale the detail: detail_scale = 1.0 means no change
     // > 1.0 boosts local contrast, < 1.0 reduces it
-    const float scaled_detail_ev = detail_scale * detail_ev;
-
+    const float scaled_detail_ev = powf(2.0f, detail_scale) * detail_ev;
     // The correction is the difference between scaled and original detail
     const float correction_ev = scaled_detail_ev - detail_ev;
 
+    // Normalize global contrast with middle grey = 1
+    const float mid_grey = 0.1845f * sqrtf(3); // 18% grey in linear space with correction from normalization
+    const float exposure_adjustment = powf(lum_smoothed / mid_grey, powf(2.0f, global_scale)) * mid_grey / lum_smoothed;
+
     // Apply correction in linear space
-    const float multiplier = exp2f(correction_ev);
+    const float multiplier = exp2f(correction_ev) * exposure_adjustment;
 
     for_each_channel(c)
       out[4 * k + c] = in[4 * k + c] * multiplier;
@@ -536,11 +565,11 @@ static void local_contrast_process(dt_iop_module_t *self,
       piece->pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
     }
     else
-      apply_local_contrast(in, luminance_pixel, luminance_smoothed, out, roi_in, roi_out, d->detail_scale);
+      apply_local_contrast(in, luminance_pixel, luminance_smoothed, out, roi_in, roi_out, d->detail_red, d->detail_green, d->detail_blue, d->global_red, d->global_green, d->global_blue);
   }
   else
   {
-    apply_local_contrast(in, luminance_pixel, luminance_smoothed, out, roi_in, roi_out, d->detail_scale);
+    apply_local_contrast(in, luminance_pixel, luminance_smoothed, out, roi_in, roi_out, d->detail_red, d->detail_green, d->detail_blue, d->global_red, d->global_green, d->global_blue);
   }
 
   if(!cached)
@@ -602,7 +631,12 @@ void commit_params(dt_iop_module_t *self,
   d->method = p->method;
   d->details = p->details;
   d->iterations = p->iterations;
-  d->detail_scale = p->detail_scale;
+  d->detail_red = p->detail_red;
+  d->detail_green = p->detail_green;
+  d->detail_blue = p->detail_blue;
+  d->global_red = p->global_red;
+  d->global_green = p->global_green;
+  d->global_blue = p->global_blue;
 
   // UI blending param is the square root of the actual blending parameter
   // to make it more sensitive to small values that represent the most important value domain.
@@ -778,15 +812,66 @@ void gui_init(dt_iop_module_t *self)
   self->widget = dt_gui_vbox();
 
   // Detail boost slider
-  g->detail_scale = dt_bauhaus_slider_from_params(self, "detail_scale");
-  dt_bauhaus_slider_set_soft_range(g->detail_scale, 0.25, 3.0);
-  dt_bauhaus_slider_set_digits(g->detail_scale, 2);
+  g->detail_red = dt_bauhaus_slider_from_params(self, "detail_red");
+  dt_bauhaus_slider_set_soft_range(g->detail_red, -1.0, 1.0);
+  dt_bauhaus_slider_set_digits(g->detail_red, 2);
   gtk_widget_set_tooltip_text
-    (g->detail_scale,
+    (g->detail_red,
      _("amount of local contrast enhancement\n"
-       "1.0 = no change\n"
-       "> 1.0 = boost local contrast\n"
-       "< 1.0 = reduce local contrast"));
+       "0.0 = no change\n"
+       "> 0.0 = boost local contrast\n"
+       "< 0.0 = reduce local contrast"));
+
+  g->detail_green = dt_bauhaus_slider_from_params(self, "detail_green");
+  dt_bauhaus_slider_set_soft_range(g->detail_green, -1.0, 1.0);
+  dt_bauhaus_slider_set_digits(g->detail_green, 2);
+  gtk_widget_set_tooltip_text
+    (g->detail_green,
+     _("amount of local contrast enhancement\n"
+       "0.0 = no change\n"
+       "> 0.0 = boost local contrast\n"
+       "< 0.0 = reduce local contrast"));
+
+  g->detail_blue = dt_bauhaus_slider_from_params(self, "detail_blue");
+  dt_bauhaus_slider_set_soft_range(g->detail_blue, -1.0, 1.0);
+  dt_bauhaus_slider_set_digits(g->detail_blue, 2);
+  gtk_widget_set_tooltip_text
+    (g->detail_blue,
+     _("amount of local contrast enhancement\n" 
+       "0.0 = no change\n"
+       "> 0.0 = boost local contrast\n"
+       "< 0.0 = reduce local contrast"));
+
+  // Global contrast boost slider
+  g->global_red = dt_bauhaus_slider_from_params(self, "global_red");
+  dt_bauhaus_slider_set_soft_range(g->global_red, -1.0, 1.0);
+  dt_bauhaus_slider_set_digits(g->global_red, 2);
+  gtk_widget_set_tooltip_text
+    (g->global_red,
+     _("amount of global contrast enhancement\n"
+       "0.0 = no change\n"
+       "> 0.0 = boost global contrast\n"
+       "< 0.0 = reduce global contrast"));
+      
+  g->global_green = dt_bauhaus_slider_from_params(self, "global_green");
+  dt_bauhaus_slider_set_soft_range(g->global_green, -1.0, 1.0);
+  dt_bauhaus_slider_set_digits(g->global_green, 2);
+  gtk_widget_set_tooltip_text
+    (g->global_green,
+     _("amount of global contrast enhancement\n"
+       "0.0 = no change\n"
+       "> 0.0 = boost global contrast\n"
+       "< 0.0 = reduce global contrast"));
+
+  g->global_blue = dt_bauhaus_slider_from_params(self, "global_blue");
+  dt_bauhaus_slider_set_soft_range(g->global_blue , -1.0, 1.0);
+  dt_bauhaus_slider_set_digits(g->global_blue, 2);
+  gtk_widget_set_tooltip_text
+    (g->global_blue,
+     _("amount of global contrast enhancement\n"
+        "0.0 = no change\n"
+        "> 0.0 = boost global contrast\n"
+        "< 0.0 = reduce global contrast"));
 
   // Separator
   gtk_widget_set_margin_top(dt_ui_section_label_new(C_("section", "masking")), DT_PIXEL_APPLY_DPI(10));
