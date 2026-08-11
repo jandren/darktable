@@ -67,18 +67,18 @@ Current status as implemented by Jandren:
 #include <omp.h>
 #endif
 
-DT_MODULE_INTROSPECTION(1, dt_iop_contrast_params_t)
+DT_MODULE_INTROSPECTION(1, dt_iop_contrastntexture_params_t)
 
-typedef struct dt_iop_contrast_params_t
+typedef struct dt_iop_contrastntexture_params_t
 {
   float gain_local_contrast;  // $MIN: 0.0 $MAX: 5.0 $DEFAULT: 1.0  $DESCRIPTION: "local contrast"
   float detail_level;         // $MIN: 0.0 $MAX: 15.0 $DEFAULT: 4.0 $DESCRIPTION: "detail level"
   float edge_protection;      // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "adjust edge protection"
   int filter_iterations;      // $MIN: 1 $MAX: 20 $DEFAULT: 1 $DESCRIPTION: "filter iterations"
   float noise_bias;           // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
-} dt_iop_contrast_params_t;
+} dt_iop_contrastntexture_params_t;
 
-typedef struct dt_iop_contrast_data_t
+typedef struct dt_iop_contrastntexture_data_t
 {
   float gain_local_contrast;
   float contrast_scale;
@@ -86,19 +86,19 @@ typedef struct dt_iop_contrast_data_t
   int radius_local;
   int iterations;
   float noise_bias;
-} dt_iop_contrast_data_t;
+} dt_iop_contrastntexture_data_t;
 
-typedef enum dt_iop_details_display_t
+typedef enum dt_iop_contrastntexture_details_display_t
 {
   DT_LC_MASK_OFF = -1,
   DT_LC_MASK_LOCAL = 0,
   DT_LC_MASK_LAST = 1
-} dt_iop_details_display_t;
+} dt_iop_contrastntexture_details_display_t;
 
-typedef struct dt_iop_contrast_gui_data_t
+typedef struct dt_iop_contrastntexture_gui_data_t
 {
   // Flags
-  dt_iop_details_display_t details_display;
+  dt_iop_contrastntexture_details_display_t details_display;
 
   // GTK widgets
   GtkWidget *gain_local_contrast;
@@ -106,7 +106,7 @@ typedef struct dt_iop_contrast_gui_data_t
   GtkWidget *edge_protection;
   GtkWidget *filter_iterations;
   GtkWidget *noise_bias;
-} dt_iop_contrast_gui_data_t;
+} dt_iop_contrastntexture_gui_data_t;
 
 
 const char *name()
@@ -162,7 +162,7 @@ static inline void compute_luminance_and_mask(const float *const restrict in,
                                               float *const restrict luminance,
                                               float *const restrict smoothed_luminance,
                                               const dt_iop_roi_t *const roi_in,
-                                              const dt_iop_contrast_data_t *const d)
+                                              const dt_iop_contrastntexture_data_t *const d)
 {
   size_t width = (size_t)roi_in->width;
   size_t height = (size_t)roi_in->height;
@@ -212,7 +212,7 @@ static inline void apply_local_contrast(const float *const restrict in,
                                         const float *const restrict luminance_smoothed,
                                         float *const restrict out,
                                         const dt_iop_roi_t *const roi_in,
-                                        const dt_iop_contrast_data_t *const d)
+                                        const dt_iop_contrastntexture_data_t *const d)
 {
   const size_t npixels = (size_t)roi_in->width * roi_in->height;
   const float gain_local = (d->gain_local_contrast - 1.0f);
@@ -248,7 +248,7 @@ static inline void display_local_mask(const float *const restrict luminance_pixe
                                       const float *const restrict luminance_smoothed,
                                       float *const restrict out,
                                       const dt_iop_roi_t *const roi_in,
-                                      const dt_iop_contrast_data_t *const d)
+                                      const dt_iop_contrastntexture_data_t *const d)
 {
   const size_t npixels = (size_t)roi_in->width * roi_in->height;
   const float noise_bias = d->noise_bias;
@@ -279,8 +279,8 @@ void process(dt_iop_module_t *self,
              const dt_iop_roi_t *const roi_in,
              const dt_iop_roi_t *const roi_out)
 {
-  const dt_iop_contrast_data_t *const d = piece->data;
-  dt_iop_contrast_gui_data_t *const g = self->gui_data;
+  const dt_iop_contrastntexture_data_t *const d = piece->data;
+  dt_iop_contrastntexture_gui_data_t *const g = self->gui_data;
 
   const float *const restrict in = (float *const)ivoid;
   float *const restrict out = (float *const)ovoid;
@@ -322,7 +322,7 @@ void modify_roi_in(dt_iop_module_t *self,
                    const dt_iop_roi_t *roi_out,
                    dt_iop_roi_t *roi_in)
 {
-  dt_iop_contrast_data_t *const d = piece->data;
+  dt_iop_contrastntexture_data_t *const d = piece->data;
 
   // Get the scaled window radius for the box average
   const float max_size = (float)((piece->iwidth > piece->iheight) ? piece->iwidth : piece->iheight);
@@ -337,8 +337,8 @@ void commit_params(dt_iop_module_t *self,
                    dt_dev_pixelpipe_t *pipe,
                    dt_dev_pixelpipe_iop_t *piece)
 {
-  const dt_iop_contrast_params_t *p = (dt_iop_contrast_params_t *)p1;
-  dt_iop_contrast_data_t *d = piece->data;
+  const dt_iop_contrastntexture_params_t *p = (dt_iop_contrastntexture_params_t *)p1;
+  dt_iop_contrastntexture_data_t *d = piece->data;
 
   d->iterations = p->filter_iterations;
   d->gain_local_contrast = p->gain_local_contrast;
@@ -369,7 +369,7 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   // Activate the module if it wasn't
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->off), TRUE);
 
-  dt_iop_contrast_gui_data_t *g = self->gui_data;
+  dt_iop_contrastntexture_gui_data_t *g = self->gui_data;
   g->details_display = DT_LC_MASK_OFF;
 
   const gboolean toggle_is_active = dt_bauhaus_widget_get_quad_active(GTK_WIDGET(togglebutton));
@@ -384,7 +384,7 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
 
 void gui_init(dt_iop_module_t *self)
 {
-  dt_iop_contrast_gui_data_t *g = IOP_GUI_ALLOC(contrast);
+  dt_iop_contrastntexture_gui_data_t *g = IOP_GUI_ALLOC(contrastntexture);
   g->details_display = DT_LC_MASK_OFF;
 
   // Main container
