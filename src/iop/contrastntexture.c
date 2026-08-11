@@ -66,7 +66,7 @@ Current status as implemented by Jandren:
 #include <omp.h>
 #endif
 
-DT_MODULE_INTROSPECTION(1, dt_iop_contrastntexture_params_t)
+DT_MODULE_INTROSPECTION(2, dt_iop_contrastntexture_params_t)
 
 typedef struct dt_iop_contrastntexture_params_t
 {
@@ -75,6 +75,8 @@ typedef struct dt_iop_contrastntexture_params_t
   float edge_protection;      // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "adjust edge protection"
   int filter_iterations;      // $MIN: 1 $MAX: 20 $DEFAULT: 1 $DESCRIPTION: "filter iterations"
   float noise_bias;           // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
+  float gain_shadows;         // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "shadows"
+  float gain_highlights;      // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "highlights"
 } dt_iop_contrastntexture_params_t;
 
 typedef struct dt_iop_contrastntexture_data_t
@@ -85,6 +87,10 @@ typedef struct dt_iop_contrastntexture_data_t
   int radius_local;
   int iterations;
   float noise_bias;
+  float slope_shadows;
+  float slope_highlights;
+  float midtones_width;
+  float midtones_polynomial[3];
 } dt_iop_contrastntexture_data_t;
 
 typedef enum dt_iop_contrastntexture_details_display_t
@@ -99,8 +105,12 @@ typedef struct dt_iop_contrastntexture_gui_data_t
   // Flags
   dt_iop_contrastntexture_details_display_t details_display;
 
-  // GTK widgets
+  // GTK widgets adjustments
   GtkWidget *gain_local_contrast;
+  GtkWidget *gain_shadows;
+  GtkWidget *gain_highlights;
+
+  // GTK widgets filter settings
   GtkWidget *detail_level;
   GtkWidget *edge_protection;
   GtkWidget *filter_iterations;
@@ -152,6 +162,26 @@ int legacy_params(dt_iop_module_t *self,
                   int32_t *new_params_size,
                   int *new_version)
 {
+  if(old_version == 1)
+  {
+    typedef struct dt_iop_contrastntexture_params_v1_t
+    {
+      float gain_local_contrast;
+      float detail_level;
+      float edge_protection;
+      int filter_iterations;
+      float noise_bias;
+    } dt_iop_contrastntexture_params_v1_t;
+
+    dt_iop_contrastntexture_params_v1_t *o = (dt_iop_contrastntexture_params_v1_t *)old_params;
+    dt_iop_contrastntexture_params_t *n = malloc(sizeof(dt_iop_contrastntexture_params_t));
+    memcpy(n, o, sizeof(dt_iop_contrastntexture_params_v1_t));
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_contrastntexture_params_t);
+    *new_version = 2;
+    return 0;
+  }
   return 1;
 }
 
@@ -216,16 +246,38 @@ static inline void apply_local_contrast(const float *const restrict in,
   const size_t npixels = (size_t)roi_in->width * roi_in->height;
   const float gain_local = (d->gain_local_contrast - 1.0f);
   const float noise_bias = d->noise_bias;
+  const float slope_shadows = d->slope_shadows;
+  const float slope_highlights = d->slope_highlights;
+  const float midtones_width = d->midtones_width;
+  const float a0 = d->midtones_polynomial[0];
+  const float a1 = d->midtones_polynomial[1];
+  const float a2 = d->midtones_polynomial[2];
+  const float pivot_offset = log2f(noise_bias + 0.1845f);
 
   DT_OMP_FOR()
   for(size_t k = 0; k < npixels; k++)
   {
+    float correction_ev = 0.0f;
+
     // High pass detail in log space (EV):
     // How much brighter/darker is this pixel compared to the smooth version
     const float local_ev = extract_details(luminance_pixel[k], luminance_smoothed[k], noise_bias);
 
+    // Low pass correction for shadows and highlights
+    const float normalized_ev = log2f(fmaxf(luminance_smoothed[k], NORM_MIN)) - pivot_offset;
+    if(normalized_ev <= -midtones_width)
+      correction_ev += slope_shadows * normalized_ev;
+    else if(normalized_ev >= midtones_width)
+      correction_ev += slope_highlights * normalized_ev;
+    else
+    {
+      const float shifted_ev = normalized_ev + midtones_width; // Shift to [0, 2*midtones_width] for polynomial evaluation
+      correction_ev += (a0 + a1 * shifted_ev + a2 * shifted_ev * shifted_ev);
+    }
+    correction_ev -= normalized_ev; // Its only the difference from the identity line that matters for correction
+
     // Correction as the scaled ev difference
-    const float correction_ev = gain_local * local_ev;
+    correction_ev += gain_local * local_ev;
 
     // Apply correction in linear space
     const float multiplier = exp2f(correction_ev);;
@@ -343,6 +395,17 @@ void commit_params(dt_iop_module_t *self,
   d->gain_local_contrast = p->gain_local_contrast;
   d->noise_bias = p->noise_bias;
 
+  // Log slope of shadows andhighlights, .i.e. the power the modify them with.
+  d->slope_shadows = powf(2.0f, -p->gain_shadows);
+  d->slope_highlights = powf(2.0f, p->gain_highlights);
+
+  // Quadratic polynomial for the midtones pivot transition.
+  // First order smooth with aligned slopes at [0, 2*width]
+  d->midtones_width = 0.3f;
+  d->midtones_polynomial[0] = -d->slope_shadows * d->midtones_width;
+  d->midtones_polynomial[1] = d->slope_shadows;
+  d->midtones_polynomial[2] = (d->slope_highlights - d->slope_shadows) / (4.0f * d->midtones_width);
+
   // UI contrast scale is inverse logarithmic with 0 as 100% of image width.
   // Convert it to a linear scale for processing.
   d->contrast_scale = powf(2.0f, -p->detail_level);
@@ -381,6 +444,17 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   dt_iop_refresh_center(self);
 }
 
+void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  piece->data = calloc(1, sizeof(dt_iop_contrastntexture_data_t));
+}
+
+void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  free(piece->data);
+  piece->data = NULL;
+}
+
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_contrastntexture_gui_data_t *g = IOP_GUI_ALLOC(contrastntexture);
@@ -400,6 +474,11 @@ void gui_init(dt_iop_module_t *self)
                               _("amount of local contrast enhancement"));
   dt_bauhaus_widget_set_quad(g->gain_local_contrast, self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
                              _("visualize details adjusted by the local constrast"));
+
+  g->gain_highlights = dt_bauhaus_slider_from_params(self, "gain_highlights");
+  dt_bauhaus_slider_set_soft_range(g->gain_highlights, -2.0, 2.0);
+  g->gain_shadows = dt_bauhaus_slider_from_params(self, "gain_shadows");
+  dt_bauhaus_slider_set_soft_range(g->gain_shadows, -2.0, 2.0);
 
   // Filter settings section
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "filter settings")));
