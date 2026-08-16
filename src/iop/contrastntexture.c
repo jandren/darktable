@@ -75,8 +75,12 @@ DT_MODULE_INTROSPECTION(2, dt_iop_contrastntexture_params_t)
 
 typedef struct dt_iop_contrastntexture_params_t
 {
-  float gain_local_contrast;  // $MIN: 0.0 $MAX: 5.0 $DEFAULT: 1.0  $DESCRIPTION: "local contrast"
-  float detail_level;         // $MIN: 0.0 $MAX: 15.0 $DEFAULT: 4.0 $DESCRIPTION: "detail level"
+  float gain_coarse_details;  // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "coarse details"
+  float gain_broad_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "broad details"
+  float gain_medium_details;  // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "medium details"
+  float gain_fine_details;    // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "fine details"
+  float gain_micro_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro details"
+  float detail_level;         // $MIN: 1.0 $MAX: 15.0 $DEFAULT: 4.0 $DESCRIPTION: "detail level"
   float edge_protection;      // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "adjust edge protection"
   int filter_iterations;      // $MIN: 1 $MAX: 20 $DEFAULT: 1 $DESCRIPTION: "filter iterations"
   float noise_bias;           // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
@@ -86,10 +90,11 @@ typedef struct dt_iop_contrastntexture_params_t
 
 typedef struct dt_iop_contrastntexture_data_t
 {
-  float gain_local_contrast;
-  float contrast_scale;
+  // coarse, broad, medium, fine, micro
+  float gain_details[5]; 
+  int radius_details[15];
+  float scale_details[15];
   float feathering;
-  int radius_local;
   int iterations;
   float noise_bias;
   float slope_shadows;
@@ -101,8 +106,12 @@ typedef struct dt_iop_contrastntexture_data_t
 typedef enum dt_iop_contrastntexture_details_display_t
 {
   DT_LC_MASK_OFF = -1,
-  DT_LC_MASK_LOCAL = 0,
-  DT_LC_MASK_LAST = 1
+  DT_LC_MASK_COARSE = 0,
+  DT_LC_MASK_BROAD = 1,
+  DT_LC_MASK_MEDIUM = 2,
+  DT_LC_MASK_FINE = 3,
+  DT_LC_MASK_MICRO = 4,
+  DT_LC_MASK_LAST = 5
 } dt_iop_contrastntexture_details_display_t;
 
 typedef struct dt_iop_contrastntexture_gui_data_t
@@ -111,7 +120,7 @@ typedef struct dt_iop_contrastntexture_gui_data_t
   dt_iop_contrastntexture_details_display_t details_display;
 
   // GTK widgets adjustments
-  GtkWidget *gain_local_contrast;
+  GtkWidget *gain_details[5]; // coarse, broad, medium, fine, micro
   GtkWidget *gain_shadows;
   GtkWidget *gain_highlights;
 
@@ -180,7 +189,15 @@ int legacy_params(dt_iop_module_t *self,
 
     dt_iop_contrastntexture_params_v1_t *o = (dt_iop_contrastntexture_params_v1_t *)old_params;
     dt_iop_contrastntexture_params_t *n = malloc(sizeof(dt_iop_contrastntexture_params_t));
-    memcpy(n, o, sizeof(dt_iop_contrastntexture_params_v1_t));
+    n->gain_coarse_details = o->gain_local_contrast - 1.0f;
+    n->gain_broad_details = o->gain_local_contrast - 1.0f;
+    n->gain_medium_details = o->gain_local_contrast - 1.0f;
+    n->gain_fine_details = o->gain_local_contrast - 1.0f;
+    n->gain_micro_details = o->gain_local_contrast - 1.0f;
+    n->detail_level = o->detail_level;
+    n->edge_protection = o->edge_protection;
+    n->filter_iterations = 1;
+    n->noise_bias = o->noise_bias;
 
     *new_params = n;
     *new_params_size = sizeof(dt_iop_contrastntexture_params_t);
@@ -192,14 +209,13 @@ int legacy_params(dt_iop_module_t *self,
 
 // Compute smoothed luminance mask using edge-aware filters
 __DT_CLONE_TARGETS__
-static inline void compute_luminance_and_mask(const float *const restrict in,
-                                              float *const restrict luminance,
-                                              float *const restrict smoothed_luminance,
-                                              const dt_iop_roi_t *const roi_in,
-                                              const dt_iop_contrastntexture_data_t *const d)
+static inline void compute_luminance(const float *const restrict in,
+                                      float *const restrict luminance,
+                                      const dt_iop_roi_t *const roi_in,
+                                      const dt_iop_contrastntexture_data_t *const d)
 {
-  size_t width = (size_t)roi_in->width;
-  size_t height = (size_t)roi_in->height;
+  const size_t width = (size_t)roi_in->width;
+  const size_t height = (size_t)roi_in->height;
   const size_t npixels = width * height;
 
   // First compute pixel-wise luminance (no boost) and add noise bias
@@ -211,12 +227,20 @@ static inline void compute_luminance_and_mask(const float *const restrict in,
   {
     luminance[k] += noise_bias;
   }
+}
 
-  // Then apply the smoothing filter on a copy
-  memcpy(smoothed_luminance, luminance, npixels * sizeof(float));
+// Compute smoothed luminance mask using edge-aware filters
+__DT_CLONE_TARGETS__
+static inline void compute_mask(float *const restrict smoothed_luminance,
+                                const dt_iop_roi_t *const roi_in,
+                                const dt_iop_contrastntexture_data_t *const d,
+                                const int level)
+{
+  const size_t width = (size_t)roi_in->width;
+  const size_t height = (size_t)roi_in->height;
 
   fast_eigf_surface_blur(smoothed_luminance, width, height,
-                         d->radius_local, d->feathering, d->iterations,
+                         d->radius_details[level], d->feathering, d->iterations,
                          DT_GF_BLENDING_LINEAR, 1.0f,
                          0.0f, NORM_MIN, 4.0f);
 }
@@ -237,59 +261,34 @@ static inline float extract_details(const float luminance_pixel,
   return weiner_gain * fmaxf(fminf(log_pixel - log_smoothed, 5.0f), -5.0f);
 }
 
-// Apply local contrast enhancement
-// The detail (local contrast) is the log-space difference between pixel luminance
-// and smoothed luminance. Boosting this difference amplifies local details.
+// Apply shadow and highlight enhancement
+// Different slopes for shadows and highlights, with a smooth transition in the midtones
 __DT_CLONE_TARGETS__
-static inline void apply_local_contrast(const float *const restrict in,
-                                        const float *const restrict luminance_pixel,
-                                        const float *const restrict luminance_smoothed,
-                                        float *const restrict out,
-                                        const dt_iop_roi_t *const roi_in,
-                                        const dt_iop_contrastntexture_data_t *const d)
+static inline float apply_shadows_highlights(const float luminance_lowpass,
+                                            const dt_iop_contrastntexture_data_t *const d)
 {
-  const size_t npixels = (size_t)roi_in->width * roi_in->height;
-  const float gain_local = (d->gain_local_contrast - 1.0f);
-  const float noise_bias = d->noise_bias;
   const float slope_shadows = d->slope_shadows;
   const float slope_highlights = d->slope_highlights;
   const float midtones_width = d->midtones_width;
   const float a0 = d->midtones_polynomial[0];
   const float a1 = d->midtones_polynomial[1];
   const float a2 = d->midtones_polynomial[2];
+  const float noise_bias = d->noise_bias;
   const float pivot_offset = log2f(noise_bias + 0.1845f);
 
-  DT_OMP_FOR()
-  for(size_t k = 0; k < npixels; k++)
+  float correction_ev = 0.0f;
+  // Low pass correction for shadows and highlights
+  const float normalized_ev = log2f(fmaxf(luminance_lowpass, NORM_MIN)) - pivot_offset;
+  if(normalized_ev <= -midtones_width)
+    correction_ev += slope_shadows * normalized_ev;
+  else if(normalized_ev >= midtones_width)
+    correction_ev += slope_highlights * normalized_ev;
+  else
   {
-    float correction_ev = 0.0f;
-
-    // High pass detail in log space (EV):
-    // How much brighter/darker is this pixel compared to the smooth version
-    const float local_ev = extract_details(luminance_pixel[k], luminance_smoothed[k], noise_bias);
-
-    // Low pass correction for shadows and highlights
-    const float normalized_ev = log2f(fmaxf(luminance_smoothed[k], NORM_MIN)) - pivot_offset;
-    if(normalized_ev <= -midtones_width)
-      correction_ev += slope_shadows * normalized_ev;
-    else if(normalized_ev >= midtones_width)
-      correction_ev += slope_highlights * normalized_ev;
-    else
-    {
-      const float shifted_ev = normalized_ev + midtones_width; // Shift to [0, 2*midtones_width] for polynomial evaluation
-      correction_ev += (a0 + a1 * shifted_ev + a2 * shifted_ev * shifted_ev);
-    }
-    correction_ev -= normalized_ev; // Its only the difference from the identity line that matters for correction
-
-    // Correction as the scaled ev difference
-    correction_ev += gain_local * local_ev;
-
-    // Apply correction in linear space
-    const float multiplier = exp2f(correction_ev);;
-    for_each_channel(c)
-      out[4 * k + c] = in[4 * k + c] * multiplier;
-    out[4 * k + 3] = in[4 * k + 3];
+    const float shifted_ev = normalized_ev + midtones_width; // Shift to [0, 2*midtones_width] for polynomial evaluation
+    correction_ev += (a0 + a1 * shifted_ev + a2 * shifted_ev * shifted_ev);
   }
+  return correction_ev - normalized_ev; // Its only the difference from the identity line that matters for correction
 }
 
 /*
@@ -346,31 +345,107 @@ void process(dt_iop_module_t *self,
   const size_t npixels = width * height;
 
   float *restrict luminance_pixel = dt_alloc_align_float(npixels);
-  float *restrict luminance_smoothed_local = dt_alloc_align_float(npixels);
+  float *restrict luminance_smoothed_coarse = dt_alloc_align_float(npixels);
+  float *restrict luminance_smoothed_broad = dt_alloc_align_float(npixels);
+  float *restrict luminance_smoothed_medium = dt_alloc_align_float(npixels);
+  float *restrict luminance_smoothed_fine = dt_alloc_align_float(npixels);
+  float *restrict luminance_smoothed_micro = dt_alloc_align_float(npixels);
 
-  if(!luminance_pixel || !luminance_smoothed_local)
+  if(!luminance_pixel ||
+     !luminance_smoothed_coarse ||
+     !luminance_smoothed_broad ||
+     !luminance_smoothed_medium ||
+     !luminance_smoothed_fine ||
+     !luminance_smoothed_micro)
   {
-    dt_control_log(_("local contrast failed to allocate memory, check your RAM settings"));
+    dt_control_log(_("contrast and texture failed to allocate memory, check your RAM settings"));
     dt_free_align(luminance_pixel);
-    dt_free_align(luminance_smoothed_local);
+    dt_free_align(luminance_smoothed_coarse);
+    dt_free_align(luminance_smoothed_broad);
+    dt_free_align(luminance_smoothed_medium);
+    dt_free_align(luminance_smoothed_fine);
+    dt_free_align(luminance_smoothed_micro);
     return;
   }
 
-  compute_luminance_and_mask(in, luminance_pixel, luminance_smoothed_local, roi_in, d);
+  compute_luminance(in, luminance_pixel, roi_in, d);
+
+  memcpy(luminance_smoothed_micro, luminance_pixel, npixels * sizeof(float));
+  for(size_t level = 14; level >= 5; level--)
+  {
+    if(d->radius_details[level] > 0)
+    {
+      compute_mask(luminance_smoothed_micro, roi_in, d, level);
+    }
+  }
+  compute_mask(luminance_smoothed_micro, roi_in, d, 4);
+
+  memcpy(luminance_smoothed_fine, luminance_smoothed_micro, npixels * sizeof(float));
+  compute_mask(luminance_smoothed_fine, roi_in, d, 3);
+
+  memcpy(luminance_smoothed_medium, luminance_smoothed_fine, npixels * sizeof(float));
+  compute_mask(luminance_smoothed_medium, roi_in, d, 2);
+
+  memcpy(luminance_smoothed_broad, luminance_smoothed_medium, npixels * sizeof(float));
+  compute_mask(luminance_smoothed_broad, roi_in, d, 1);
+  
+  memcpy(luminance_smoothed_coarse, luminance_smoothed_broad, npixels * sizeof(float));
+  compute_mask(luminance_smoothed_coarse, roi_in, d, 0);
 
   // Display output
   if(g && g->details_display != DT_LC_MASK_OFF && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL))
   {
-    display_local_mask(luminance_pixel, luminance_smoothed_local, out, roi_in, d);
+    switch(g->details_display)
+    {
+      case DT_LC_MASK_COARSE:
+        display_local_mask(luminance_smoothed_broad, luminance_smoothed_coarse, out, roi_in, d);
+        break;
+      case DT_LC_MASK_BROAD:
+        display_local_mask(luminance_smoothed_medium, luminance_smoothed_broad, out, roi_in, d);
+        break;
+      case DT_LC_MASK_MEDIUM:
+        display_local_mask(luminance_smoothed_fine, luminance_smoothed_medium, out, roi_in, d);
+        break;
+      case DT_LC_MASK_FINE:
+        display_local_mask(luminance_smoothed_micro, luminance_smoothed_fine, out, roi_in, d);
+        break;
+      case DT_LC_MASK_MICRO:
+        display_local_mask(luminance_pixel, luminance_smoothed_micro, out, roi_in, d);
+        break;
+      default:
+        break;
+    }
     piece->pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
   }
   else
   {
-    apply_local_contrast(in, luminance_pixel, luminance_smoothed_local, out, roi_in, d);
+    DT_OMP_FOR()
+    for(size_t k = 0; k < npixels; k++)
+    {
+      // Low pass correction for shadows and highlights
+      float correction_ev = apply_shadows_highlights(luminance_smoothed_coarse[k], d);
+
+      // Details from coarse to micro
+      correction_ev += d->gain_details[0] * extract_details(luminance_smoothed_broad[k], luminance_smoothed_coarse[k], d->noise_bias);
+      correction_ev += d->gain_details[1] * extract_details(luminance_smoothed_medium[k], luminance_smoothed_broad[k], d->noise_bias);
+      correction_ev += d->gain_details[2] * extract_details(luminance_smoothed_fine[k], luminance_smoothed_medium[k], d->noise_bias);
+      correction_ev += d->gain_details[3] * extract_details(luminance_smoothed_micro[k], luminance_smoothed_fine[k], d->noise_bias);
+      correction_ev += d->gain_details[4] * extract_details(luminance_pixel[k], luminance_smoothed_micro[k], d->noise_bias);
+
+      // Apply correction in linear space
+      const float multiplier = exp2f(correction_ev);;
+      for_each_channel(c)
+        out[4 * k + c] = in[4 * k + c] * multiplier;
+      out[4 * k + 3] = in[4 * k + 3];
+    }
   }
 
   dt_free_align(luminance_pixel);
-  dt_free_align(luminance_smoothed_local);
+  dt_free_align(luminance_smoothed_coarse);
+  dt_free_align(luminance_smoothed_broad);
+  dt_free_align(luminance_smoothed_medium);
+  dt_free_align(luminance_smoothed_fine);
+  dt_free_align(luminance_smoothed_micro);
 }
 
 void modify_roi_in(dt_iop_module_t *self,
@@ -382,10 +457,11 @@ void modify_roi_in(dt_iop_module_t *self,
 
   // Get the scaled window radius for the box average
   const float max_size = (float)((piece->iwidth > piece->iheight) ? piece->iwidth : piece->iheight);
-  const float base_diameter = d->contrast_scale * max_size * roi_in->scale;
-
-  const float diameter_local = base_diameter;
-  d->radius_local = (int)((diameter_local - 1.0f) / 2.0f);
+  for(int level = 0; level < 15; level++)
+  {
+    const float base_diameter = fminf(d->scale_details[level], 0.5f) * max_size * roi_in->scale;
+    d->radius_details[level] = (int)((base_diameter - 1.0f) / 2.0f);
+  }
 }
 
 void commit_params(dt_iop_module_t *self,
@@ -396,9 +472,14 @@ void commit_params(dt_iop_module_t *self,
   const dt_iop_contrastntexture_params_t *p = (dt_iop_contrastntexture_params_t *)p1;
   dt_iop_contrastntexture_data_t *d = piece->data;
 
-  d->iterations = p->filter_iterations;
-  d->gain_local_contrast = p->gain_local_contrast;
+  d->iterations = 1; //p->filter_iterations;
   d->noise_bias = p->noise_bias;
+
+  d->gain_details[0] = p->gain_coarse_details;
+  d->gain_details[1] = p->gain_broad_details;
+  d->gain_details[2] = p->gain_medium_details;
+  d->gain_details[3] = p->gain_fine_details;
+  d->gain_details[4] = p->gain_micro_details;
 
   // Log slope of shadows andhighlights, .i.e. the power the modify them with.
   d->slope_shadows = powf(2.0f, -p->gain_shadows);
@@ -412,13 +493,16 @@ void commit_params(dt_iop_module_t *self,
   d->midtones_polynomial[2] = (d->slope_highlights - d->slope_shadows) / (4.0f * d->midtones_width);
 
   // UI contrast scale is inverse logarithmic with 0 as 100% of image width.
-  // Convert it to a linear scale for processing.
-  d->contrast_scale = powf(2.0f, -p->detail_level);
+  // Convert it to a linear scale for processing. Scales are separated by powers of 2 for each step in the UI.
+  for(size_t level = 0; level < 15; level++)
+  {
+    d->scale_details[level] = powf(2.0f, -p->detail_level - (float)level);
+  }
 
   // UI feathering is inverted (higher = stricter edge preservation).
   // Adjust the strength based on the number of iterations to maintain a consistent overall effect regardless of iteration count.
   const float default_feathering = 0.2f;  // Base value based on Christian's experiments for a good balance of edge preservation and contrast boost at default settings.
-  d->feathering = default_feathering * powf(2.0f, -p->edge_protection) / (p->filter_iterations * p->filter_iterations);
+  d->feathering = default_feathering * powf(2.0f, -p->edge_protection) / (d->iterations * d->iterations);
 }
 
 static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self)
@@ -442,10 +526,18 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   const gboolean toggle_is_active = dt_bauhaus_widget_get_quad_active(GTK_WIDGET(togglebutton));
   if(toggle_is_active)
   {
-    if(togglebutton == g->gain_local_contrast) g->details_display = DT_LC_MASK_LOCAL;
+    if(togglebutton == g->gain_details[0]) g->details_display = DT_LC_MASK_COARSE;
+    if(togglebutton == g->gain_details[1]) g->details_display = DT_LC_MASK_BROAD;
+    if(togglebutton == g->gain_details[2]) g->details_display = DT_LC_MASK_MEDIUM;
+    if(togglebutton == g->gain_details[3]) g->details_display = DT_LC_MASK_FINE;
+    if(togglebutton == g->gain_details[4]) g->details_display = DT_LC_MASK_MICRO;
   }
 
-  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_local_contrast), g->details_display == DT_LC_MASK_LOCAL);
+  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[0]), g->details_display == DT_LC_MASK_COARSE);
+  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[1]), g->details_display == DT_LC_MASK_BROAD);
+  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[2]), g->details_display == DT_LC_MASK_MEDIUM);
+  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[3]), g->details_display == DT_LC_MASK_FINE);
+  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[4]), g->details_display == DT_LC_MASK_MICRO);
   dt_iop_refresh_center(self);
 }
 
@@ -468,18 +560,25 @@ void gui_init(dt_iop_module_t *self)
   // Main container
   self->widget = dt_gui_vbox();
 
-  // Local boost slider
-  g->gain_local_contrast = dt_bauhaus_slider_from_params(self, "gain_local_contrast");
-  dt_bauhaus_slider_set_soft_range(g->gain_local_contrast, 0.0, 2.0);
-  dt_bauhaus_slider_set_digits(g->gain_local_contrast, 2);
-  dt_bauhaus_slider_set_format(g->gain_local_contrast, "%");
-  dt_bauhaus_slider_set_factor(g->gain_local_contrast, 100.0);
-  dt_bauhaus_slider_set_offset(g->gain_local_contrast, -100.0);
-  gtk_widget_set_tooltip_text(g->gain_local_contrast,
-                              _("amount of local contrast enhancement"));
-  dt_bauhaus_widget_set_quad(g->gain_local_contrast, self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
-                             _("visualize details adjusted by the local constrast"));
+  // Details boost sliders
+  char *labels[5] = {_("coarse"), _("broad"), _("medium"), _("fine"), _("micro")};
+  for(int i = 0; i < 5; i++)
+  {
+    char name[256];
+    snprintf(name, sizeof(name), "gain_%s_details", labels[i]);
+    g->gain_details[i] = dt_bauhaus_slider_from_params(self, name);
+    dt_bauhaus_slider_set_soft_range(g->gain_details[i], -1.0, 1.0);
+    dt_bauhaus_slider_set_digits(g->gain_details[i], 2);
+    dt_bauhaus_slider_set_format(g->gain_details[i], "%");
+    dt_bauhaus_slider_set_factor(g->gain_details[i], 100.0);
 
+    gtk_widget_set_tooltip_text(g->gain_details[i],
+                              _("amount of contrast enhancement for this detail level"));
+    dt_bauhaus_widget_set_quad(g->gain_details[i], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
+                             _("preview the details of this level"));
+  }
+
+  // Highlights and shadows sliders
   g->gain_highlights = dt_bauhaus_slider_from_params(self, "gain_highlights");
   dt_bauhaus_slider_set_soft_range(g->gain_highlights, -2.0, 2.0);
   g->gain_shadows = dt_bauhaus_slider_from_params(self, "gain_shadows");
@@ -489,7 +588,7 @@ void gui_init(dt_iop_module_t *self)
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "filter settings")));
 
   g->detail_level = dt_bauhaus_slider_from_params(self, "detail_level");
-  dt_bauhaus_slider_set_soft_range(g->detail_level, 2.0, 10.0);
+  dt_bauhaus_slider_set_soft_range(g->detail_level, 1.0, 10.0);
   gtk_widget_set_tooltip_text(g->detail_level,
      _("detail level adjusted by the local contrast.\n"
        "higher = more contrast boost in finer details\n"
@@ -505,10 +604,11 @@ void gui_init(dt_iop_module_t *self)
                                                     "higher = more edge preservation\n"
                                                     "lower = smoother transitions, but may lead to halos around edges"));
 
-  g->filter_iterations = dt_bauhaus_slider_from_params(self, "filter_iterations");
-  dt_bauhaus_slider_set_soft_range(g->filter_iterations, 1, 5);
-  gtk_widget_set_tooltip_text(g->filter_iterations, _("number of passes of the guided filter to apply\n"
-       "helps diffusing the edges of the filter at the expense of speed"));
+  // Disable the filter iterations when we test the recursice method                                                  
+  // g->filter_iterations = dt_bauhaus_slider_from_params(self, "filter_iterations");
+  // dt_bauhaus_slider_set_soft_range(g->filter_iterations, 1, 5);
+  // gtk_widget_set_tooltip_text(g->filter_iterations, _("number of passes of the guided filter to apply\n"
+  //      "helps diffusing the edges of the filter at the expense of speed"));
 
   g->noise_bias = dt_bauhaus_slider_from_params(self, "noise_bias");
   dt_bauhaus_slider_set_soft_range(g->noise_bias, 0.0, 0.2);
