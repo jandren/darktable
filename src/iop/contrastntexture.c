@@ -75,28 +75,23 @@ typedef struct dt_iop_contrastntexture_params_t
   float gain_medium_details;  // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "medium details"
   float gain_fine_details;    // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "fine details"
   float gain_micro_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro details"
-  float detail_level;         // $MIN: 1.0 $MAX: 15.0 $DEFAULT: 4.0 $DESCRIPTION: "detail level"
+  float gain_micro1_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+1 details"
+  float gain_micro2_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+2 details"
+  float gain_micro3_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+3 details"
+  float gain_micro4_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+4 details"
+  float gain_micro5_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+5 details"
+  float gain_micro6_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+6 details"
+  float gain_micro7_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+7 details"
+  float gain_micro8_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+8 details"
+  float gain_micro9_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+9 details"
+  float gain_micro10_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "micro+10 details" 
+  float detail_level;         // $MIN: 1.0 $MAX: 15.0 $DEFAULT: 4.0 $DESCRIPTION: "base detail level"
   float edge_protection;      // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "adjust edge protection"
   int filter_iterations;      // $MIN: 1 $MAX: 20 $DEFAULT: 1 $DESCRIPTION: "filter iterations"
   float noise_bias;           // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
   float gain_shadows;         // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "shadows"
   float gain_highlights;      // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "highlights"
 } dt_iop_contrastntexture_params_t;
-
-typedef struct dt_iop_contrastntexture_data_t
-{
-  // coarse, broad, medium, fine, micro
-  float gain_details[5]; 
-  int radius_details[15];
-  float scale_details[15];
-  float feathering;
-  int iterations;
-  float noise_bias;
-  float slope_shadows;
-  float slope_highlights;
-  float midtones_width;
-  float midtones_polynomial[3];
-} dt_iop_contrastntexture_data_t;
 
 typedef enum dt_iop_contrastntexture_details_display_t
 {
@@ -106,8 +101,34 @@ typedef enum dt_iop_contrastntexture_details_display_t
   DT_LC_MASK_MEDIUM = 2,
   DT_LC_MASK_FINE = 3,
   DT_LC_MASK_MICRO = 4,
-  DT_LC_MASK_LAST = 5
+  DT_LC_MASK_MICRO1 = 5,
+  DT_LC_MASK_MICRO2 = 6,
+  DT_LC_MASK_MICRO3 = 7,
+  DT_LC_MASK_MICRO4 = 8,
+  DT_LC_MASK_MICRO5 = 9,
+  DT_LC_MASK_MICRO6 = 10,
+  DT_LC_MASK_MICRO7 = 11,
+  DT_LC_MASK_MICRO8 = 12,
+  DT_LC_MASK_MICRO9 = 13,
+  DT_LC_MASK_MICRO10 = 14,
+  DT_LC_MASK_LAST = 15
 } dt_iop_contrastntexture_details_display_t;
+
+typedef struct dt_iop_contrastntexture_data_t
+{
+  // coarse, broad, medium, fine, micro
+  float gain_details[DT_LC_MASK_LAST]; 
+  int radius_details[DT_LC_MASK_LAST];
+  float scale_details[DT_LC_MASK_LAST];
+  size_t max_level;
+  float feathering;
+  int iterations;
+  float noise_bias;
+  float slope_shadows;
+  float slope_highlights;
+  float midtones_width;
+  float midtones_polynomial[3];
+} dt_iop_contrastntexture_data_t;
 
 typedef struct dt_iop_contrastntexture_gui_data_t
 {
@@ -115,7 +136,7 @@ typedef struct dt_iop_contrastntexture_gui_data_t
   dt_iop_contrastntexture_details_display_t details_display;
 
   // GTK widgets adjustments
-  GtkWidget *gain_details[5]; // coarse, broad, medium, fine, micro
+  GtkWidget *gain_details[DT_LC_MASK_LAST]; // coarse, broad, medium, fine, micro
   GtkWidget *gain_shadows;
   GtkWidget *gain_highlights;
 
@@ -294,8 +315,8 @@ static inline float apply_shadows_highlights(const float luminance_lowpass,
  - > 0.5 = pixel brighter than neighborhood
  */
 __DT_CLONE_TARGETS__
-static inline void display_local_mask(const float *const restrict luminance_pixel,
-                                      const float *const restrict luminance_smoothed,
+static inline void display_local_mask(const float *const restrict luminance_highpass,
+                                      const float *const restrict luminance_lowpass,
                                       float *const restrict out,
                                       const dt_iop_roi_t *const roi_in,
                                       const dt_iop_contrastntexture_data_t *const d)
@@ -306,7 +327,7 @@ static inline void display_local_mask(const float *const restrict luminance_pixe
   DT_OMP_FOR()
   for(size_t k = 0; k < npixels; k++)
   {
-    const float local_ev = extract_details(luminance_pixel[k], luminance_smoothed[k], noise_bias);
+    const float local_ev = extract_details(luminance_highpass[k], luminance_lowpass[k], noise_bias);
 
     // Detail in log space, mapped to [0, 1] for display
     // Detail range roughly [-2, +2] EV mapped to [0, 1]
@@ -339,108 +360,74 @@ void process(dt_iop_module_t *self,
   const size_t height = roi_in->height;
   const size_t npixels = width * height;
 
-  float *restrict luminance_pixel = dt_alloc_align_float(npixels);
-  float *restrict luminance_smoothed_coarse = dt_alloc_align_float(npixels);
-  float *restrict luminance_smoothed_broad = dt_alloc_align_float(npixels);
-  float *restrict luminance_smoothed_medium = dt_alloc_align_float(npixels);
-  float *restrict luminance_smoothed_fine = dt_alloc_align_float(npixels);
-  float *restrict luminance_smoothed_micro = dt_alloc_align_float(npixels);
+  float *restrict luminance_highpass = dt_alloc_align_float(npixels);
+  float *restrict luminance_lowpass = dt_alloc_align_float(npixels);
+  float *restrict corrections = dt_alloc_align_float(npixels);
 
-  if(!luminance_pixel ||
-     !luminance_smoothed_coarse ||
-     !luminance_smoothed_broad ||
-     !luminance_smoothed_medium ||
-     !luminance_smoothed_fine ||
-     !luminance_smoothed_micro)
+  if(!luminance_lowpass ||
+     !luminance_highpass ||
+     !corrections)
   {
     dt_control_log(_("contrast and texture failed to allocate memory, check your RAM settings"));
-    dt_free_align(luminance_pixel);
-    dt_free_align(luminance_smoothed_coarse);
-    dt_free_align(luminance_smoothed_broad);
-    dt_free_align(luminance_smoothed_medium);
-    dt_free_align(luminance_smoothed_fine);
-    dt_free_align(luminance_smoothed_micro);
+    dt_free_align(luminance_highpass);
+    dt_free_align(luminance_lowpass);
+    dt_free_align(corrections);
     return;
   }
 
-  compute_luminance(in, luminance_pixel, roi_in, d);
-
-  memcpy(luminance_smoothed_micro, luminance_pixel, npixels * sizeof(float));
-  for(size_t level = 14; level >= 5; level--)
-  {
-    if(d->radius_details[level] > 0)
-    {
-      compute_mask(luminance_smoothed_micro, roi_in, d, level);
-    }
-  }
-  compute_mask(luminance_smoothed_micro, roi_in, d, 4);
-
-  memcpy(luminance_smoothed_fine, luminance_smoothed_micro, npixels * sizeof(float));
-  compute_mask(luminance_smoothed_fine, roi_in, d, 3);
-
-  memcpy(luminance_smoothed_medium, luminance_smoothed_fine, npixels * sizeof(float));
-  compute_mask(luminance_smoothed_medium, roi_in, d, 2);
-
-  memcpy(luminance_smoothed_broad, luminance_smoothed_medium, npixels * sizeof(float));
-  compute_mask(luminance_smoothed_broad, roi_in, d, 1);
-  
-  memcpy(luminance_smoothed_coarse, luminance_smoothed_broad, npixels * sizeof(float));
-  compute_mask(luminance_smoothed_coarse, roi_in, d, 0);
-
   // Display output
+  bool display_mask = false;
   if(g && g->details_display != DT_LC_MASK_OFF && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL))
   {
-    switch(g->details_display)
-    {
-      case DT_LC_MASK_COARSE:
-        display_local_mask(luminance_smoothed_broad, luminance_smoothed_coarse, out, roi_in, d);
-        break;
-      case DT_LC_MASK_BROAD:
-        display_local_mask(luminance_smoothed_medium, luminance_smoothed_broad, out, roi_in, d);
-        break;
-      case DT_LC_MASK_MEDIUM:
-        display_local_mask(luminance_smoothed_fine, luminance_smoothed_medium, out, roi_in, d);
-        break;
-      case DT_LC_MASK_FINE:
-        display_local_mask(luminance_smoothed_micro, luminance_smoothed_fine, out, roi_in, d);
-        break;
-      case DT_LC_MASK_MICRO:
-        display_local_mask(luminance_pixel, luminance_smoothed_micro, out, roi_in, d);
-        break;
-      default:
-        break;
-    }
+    display_mask = true;
     piece->pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
   }
-  else
+
+  compute_luminance(in, luminance_lowpass, roi_in, d);
+  memset(corrections, 0, npixels * sizeof(float));
+
+  for(int level = d->max_level; level >= 0; level--)
+  {
+    dt_print(DT_DEBUG_PIPE, "Level + %i, Filter radius %i", level, d->radius_details[level]);
+    memcpy(luminance_highpass, luminance_lowpass, npixels * sizeof(float));
+    compute_mask(luminance_lowpass, roi_in, d, level);
+    
+    if(display_mask && g->details_display == level)
+    {
+      // Steal the data to preview as a mask at the correct level and break.
+      display_local_mask(luminance_highpass, luminance_lowpass, out, roi_in, d);
+      break;
+    }
+    else
+    {
+      DT_OMP_FOR()
+      for(size_t k = 0; k < npixels; k++)
+      {
+        // Details as the bandpass difference
+        corrections[k] += d->gain_details[level] * extract_details(luminance_highpass[k], luminance_lowpass[k], d->noise_bias);
+      }
+    }
+  }  
+
+  if(!display_mask)
   {
     DT_OMP_FOR()
     for(size_t k = 0; k < npixels; k++)
     {
       // Low pass correction for shadows and highlights
-      float correction_ev = apply_shadows_highlights(luminance_smoothed_coarse[k], d);
-
-      // Details from coarse to micro
-      correction_ev += d->gain_details[0] * extract_details(luminance_smoothed_broad[k], luminance_smoothed_coarse[k], d->noise_bias);
-      correction_ev += d->gain_details[1] * extract_details(luminance_smoothed_medium[k], luminance_smoothed_broad[k], d->noise_bias);
-      correction_ev += d->gain_details[2] * extract_details(luminance_smoothed_fine[k], luminance_smoothed_medium[k], d->noise_bias);
-      correction_ev += d->gain_details[3] * extract_details(luminance_smoothed_micro[k], luminance_smoothed_fine[k], d->noise_bias);
-      correction_ev += d->gain_details[4] * extract_details(luminance_pixel[k], luminance_smoothed_micro[k], d->noise_bias);
+      float lowpass_correction = apply_shadows_highlights(luminance_lowpass[k], d);
 
       // Apply correction in linear space
-      const float multiplier = exp2f(correction_ev);;
+      const float multiplier = exp2f(corrections[k] + lowpass_correction);;
       for_each_channel(c)
         out[4 * k + c] = in[4 * k + c] * multiplier;
       out[4 * k + 3] = in[4 * k + 3];
     }
   }
 
-  dt_free_align(luminance_pixel);
-  dt_free_align(luminance_smoothed_coarse);
-  dt_free_align(luminance_smoothed_broad);
-  dt_free_align(luminance_smoothed_medium);
-  dt_free_align(luminance_smoothed_fine);
-  dt_free_align(luminance_smoothed_micro);
+  dt_free_align(luminance_highpass);
+  dt_free_align(luminance_lowpass);
+  dt_free_align(corrections);
 }
 
 void modify_roi_in(dt_iop_module_t *self,
@@ -452,11 +439,23 @@ void modify_roi_in(dt_iop_module_t *self,
 
   // Get the scaled window radius for the box average
   const float max_size = (float)((piece->iwidth > piece->iheight) ? piece->iwidth : piece->iheight);
-  for(int level = 0; level < 15; level++)
+  for(int level = 0; level < DT_LC_MASK_LAST; level++)
   {
     const float base_diameter = fminf(d->scale_details[level], 0.5f) * max_size * roi_in->scale;
-    d->radius_details[level] = (int)((base_diameter - 1.0f) / 2.0f);
+    const int radius = (int)((base_diameter - 1.0f) / 2.0f);
+    d->radius_details[level] = radius;
   }
+
+  // Find the smallest level with non zero radius.
+  d->max_level = DT_LC_MASK_LAST - 1;
+  for(int level = DT_LC_MASK_LAST - 1; level >= 0; level--)
+  {
+    dt_print(DT_DEBUG_PIPE, "Max level used %i", d->max_level);
+    if(d->radius_details[level] == 0)
+    {
+      d->max_level = level;
+    }
+  } 
 }
 
 void commit_params(dt_iop_module_t *self,
@@ -475,6 +474,16 @@ void commit_params(dt_iop_module_t *self,
   d->gain_details[2] = p->gain_medium_details;
   d->gain_details[3] = p->gain_fine_details;
   d->gain_details[4] = p->gain_micro_details;
+  d->gain_details[5] = p->gain_micro1_details;
+  d->gain_details[6] = p->gain_micro2_details;
+  d->gain_details[7] = p->gain_micro3_details;
+  d->gain_details[8] = p->gain_micro4_details;
+  d->gain_details[9] = p->gain_micro5_details;
+  d->gain_details[10] = p->gain_micro6_details;
+  d->gain_details[11] = p->gain_micro7_details;
+  d->gain_details[12] = p->gain_micro8_details;
+  d->gain_details[13] = p->gain_micro9_details;
+  d->gain_details[14] = p->gain_micro10_details;
 
   // Log slope of shadows andhighlights, .i.e. the power the modify them with.
   d->slope_shadows = powf(2.0f, -p->gain_shadows);
@@ -489,7 +498,7 @@ void commit_params(dt_iop_module_t *self,
 
   // UI contrast scale is inverse logarithmic with 0 as 100% of image width.
   // Convert it to a linear scale for processing. Scales are separated by powers of 2 for each step in the UI.
-  for(size_t level = 0; level < 15; level++)
+  for(size_t level = 0; level < DT_LC_MASK_LAST; level++)
   {
     d->scale_details[level] = powf(2.0f, -p->detail_level - (float)level);
   }
@@ -521,18 +530,20 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   const gboolean toggle_is_active = dt_bauhaus_widget_get_quad_active(GTK_WIDGET(togglebutton));
   if(toggle_is_active)
   {
-    if(togglebutton == g->gain_details[0]) g->details_display = DT_LC_MASK_COARSE;
-    if(togglebutton == g->gain_details[1]) g->details_display = DT_LC_MASK_BROAD;
-    if(togglebutton == g->gain_details[2]) g->details_display = DT_LC_MASK_MEDIUM;
-    if(togglebutton == g->gain_details[3]) g->details_display = DT_LC_MASK_FINE;
-    if(togglebutton == g->gain_details[4]) g->details_display = DT_LC_MASK_MICRO;
+    for(int i = 0; i < DT_LC_MASK_LAST; i++)
+    {
+      if(togglebutton == g->gain_details[i])
+      {
+        g->details_display = i;
+        break;
+      }
+    }
   }
 
-  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[0]), g->details_display == DT_LC_MASK_COARSE);
-  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[1]), g->details_display == DT_LC_MASK_BROAD);
-  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[2]), g->details_display == DT_LC_MASK_MEDIUM);
-  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[3]), g->details_display == DT_LC_MASK_FINE);
-  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[4]), g->details_display == DT_LC_MASK_MICRO);
+  for(int i = 0; i < DT_LC_MASK_LAST; i++)
+  {
+    dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[i]), g->details_display == i);
+  }
   dt_iop_refresh_center(self);
 }
 
@@ -556,13 +567,13 @@ void gui_init(dt_iop_module_t *self)
   self->widget = dt_gui_vbox();
 
   // Details boost sliders
-  char *labels[5] = {_("coarse"), _("broad"), _("medium"), _("fine"), _("micro")};
-  for(int i = 0; i < 5; i++)
+  char *labels[DT_LC_MASK_LAST] = {_("coarse"), _("broad"), _("medium"), _("fine"), _("micro"), _("micro1"), _("micro2"), _("micro3"), _("micro4"), _("micro5"), _("micro6"), _("micro7"), _("micro8"), _("micro9"), _("micro10")};
+  for(int i = 0; i < DT_LC_MASK_LAST; i++)
   {
     char name[256];
     snprintf(name, sizeof(name), "gain_%s_details", labels[i]);
     g->gain_details[i] = dt_bauhaus_slider_from_params(self, name);
-    dt_bauhaus_slider_set_soft_range(g->gain_details[i], -1.0, 1.0);
+    dt_bauhaus_slider_set_soft_range(g->gain_details[i], -1.0, 1.5);
     dt_bauhaus_slider_set_digits(g->gain_details[i], 2);
     dt_bauhaus_slider_set_format(g->gain_details[i], "%");
     dt_bauhaus_slider_set_factor(g->gain_details[i], 100.0);
@@ -576,8 +587,12 @@ void gui_init(dt_iop_module_t *self)
   // Highlights and shadows sliders
   g->gain_highlights = dt_bauhaus_slider_from_params(self, "gain_highlights");
   dt_bauhaus_slider_set_soft_range(g->gain_highlights, -2.0, 2.0);
+  gtk_widget_set_tooltip_text(g->gain_highlights,
+    _("adjust highlights based on the coarse detail level."));
   g->gain_shadows = dt_bauhaus_slider_from_params(self, "gain_shadows");
   dt_bauhaus_slider_set_soft_range(g->gain_shadows, -2.0, 2.0);
+  gtk_widget_set_tooltip_text(g->gain_highlights,
+    _("adjust shadows based on the coarse detail level."));
 
   // Filter settings section
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "filter settings")));
@@ -585,13 +600,13 @@ void gui_init(dt_iop_module_t *self)
   g->detail_level = dt_bauhaus_slider_from_params(self, "detail_level");
   dt_bauhaus_slider_set_soft_range(g->detail_level, 1.0, 10.0);
   gtk_widget_set_tooltip_text(g->detail_level,
-     _("detail level adjusted by the local contrast.\n"
+     _("base detail level adjusted by the course contrast.\n"
        "higher = more contrast boost in finer details\n"
        "lower = more contrast boost in coarser details"));
 
 
   g->edge_protection = dt_bauhaus_slider_from_params(self, "edge_protection");
-  dt_bauhaus_slider_set_soft_range(g->edge_protection, -2.0, 2.0);
+  dt_bauhaus_slider_set_soft_range(g->edge_protection, -5.0, 5.0);
   dt_bauhaus_slider_set_digits(g->edge_protection, 2);
   dt_bauhaus_slider_set_format(g->edge_protection, "%");
   dt_bauhaus_slider_set_factor(g->edge_protection, 100.0);
@@ -612,6 +627,27 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->noise_bias, _("add bias to reduce shadow noise amplification.\n"
                                                "only affects dark parts of the image."));
 }
+
+/*
+void gui_update(dt_iop_module_t *self)
+{
+  // Attempt att disabling irrelevant sliders.
+  dt_iop_contrastntexture_gui_data_t *g = self->gui_data;
+  dt_iop_contrastntexture_params_t *const p = self->params;
+  const float iwidth = (float)self->dev->image_storage.width;
+  const float iheight = (float)self->dev->image_storage.height;
+  const float max_size = fmaxf(iwidth, iheight);
+
+  const float min_scale = (1*2 + 1) / max_size;
+  const int highest_used_level = -(int)(log2f(min_scale) + p->detail_level);
+  
+  //const int highest_used_level = compute_highest_used_detail_level(self, p);
+
+  dt_print(DT_DEBUG_PIPE, "Disabling levels over: %i", highest_used_level);
+  for(int i = 0; i < DT_LC_MASK_LAST; i++)
+    gtk_widget_set_sensitive(g->gain_details[i], i <= highest_used_level);
+}
+*/
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
