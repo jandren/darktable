@@ -103,7 +103,7 @@ typedef struct dt_iop_contrastntexture_data_t
   float gain_details[DT_LC_MASK_LAST]; 
   int radius_details[MAX_ITERATIONS];
   float scale_details[MAX_ITERATIONS];
-  size_t max_level;
+  int max_level;
   float feathering;
   int iterations;
   float noise_bias;
@@ -259,7 +259,7 @@ static inline float extract_details(const float luminance_pixel,
 }
 
 // Map a pyramid level to a position t in [-pi/2, pi/2], from coarsest (clarity) to finest (details)
-static inline float level_to_t(const size_t level, const size_t max_level)
+static inline float level_to_t(const int level, const int max_level)
 {
   return max_level > 0
     ? M_PI_F * (float)level / (float)max_level - M_PI_F / 2.0f
@@ -587,12 +587,10 @@ void gui_init(dt_iop_module_t *self)
   dt_gui_box_add(self->widget, dt_ui_section_label_new(_("local contrast")));
   
   // Details boost sliders
-  const char *labels[DT_LC_MASK_LAST] = {_("clarity"), _("texture"), _("details")};
+  const char *labels[DT_LC_MASK_LAST] = {"gain_clarity", "gain_texture", "gain_details"};
   for(int i = 0; i < DT_LC_MASK_LAST; i++)
   {
-    char name[256];
-    snprintf(name, sizeof(name), "gain_%s", labels[i]);
-    g->gain_details[i] = dt_bauhaus_slider_from_params(self, name);
+    g->gain_details[i] = dt_bauhaus_slider_from_params(self, labels[i]);
     dt_bauhaus_slider_set_soft_range(g->gain_details[i], -1.0, 1.5);
     dt_bauhaus_slider_set_digits(g->gain_details[i], 2);
     dt_bauhaus_slider_set_format(g->gain_details[i], "%");
