@@ -80,7 +80,6 @@ typedef struct dt_iop_contrastntexture_params_t
   float gain_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "details"
   float detail_level;   // $MIN: 1.0 $MAX: 15.0 $DEFAULT: 5.0 $DESCRIPTION: "base detail level"
   float edge_protection; // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "adjust edge protection"
-  int filter_iterations; // $MIN: 1 $MAX: 20 $DEFAULT: 1 $DESCRIPTION: "filter iterations"
   float noise_bias;      // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
   float gain_shadows;    // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "shadows"
   float gain_highlights; // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "highlights"
@@ -101,11 +100,11 @@ typedef struct dt_iop_contrastntexture_data_t
 {
   // coarse, broad, medium, fine, micro
   float gain_details[DT_LC_MASK_LAST]; 
-  int radius_details[MAX_ITERATIONS];
+  float radius_details[MAX_ITERATIONS];
   float scale_details[MAX_ITERATIONS];
-  int max_level;
+  float max_detail_level;
+  int   max_used_level;
   float feathering;
-  int iterations;
   float noise_bias;
   float slope_shadows;
   float slope_highlights;
@@ -126,7 +125,6 @@ typedef struct dt_iop_contrastntexture_gui_data_t
   // GTK widgets filter settings
   GtkWidget *detail_level;
   GtkWidget *edge_protection;
-  GtkWidget *filter_iterations;
   GtkWidget *noise_bias;
 } dt_iop_contrastntexture_gui_data_t;
 
@@ -193,7 +191,6 @@ int legacy_params(dt_iop_module_t *self,
     n->gain_details = o->gain_local_contrast - 1.0f;
     n->detail_level = o->detail_level;
     n->edge_protection = o->edge_protection;
-    n->filter_iterations = 1;
     n->noise_bias = o->noise_bias;
 
     *new_params = n;
@@ -237,7 +234,7 @@ static inline void compute_mask(float *const restrict smoothed_luminance,
   const size_t height = (size_t)roi_in->height;
 
   fast_eigf_surface_blur(smoothed_luminance, width, height,
-                         d->radius_details[level], d->feathering, d->iterations,
+                         d->radius_details[level], d->feathering, 1,
                          DT_GF_BLENDING_LINEAR, 1.0f,
                          0.0f, NORM_MIN, 4.0f);
 }
@@ -258,21 +255,21 @@ static inline float extract_details(const float luminance_pixel,
   return weiner_gain * fmaxf(fminf(log_pixel - log_smoothed, 5.0f), -5.0f);
 }
 
-// Map a pyramid level to a position t in [-pi/2, pi/2], from coarsest (clarity) to finest (details)
-static inline float level_to_t(const int level, const int max_level)
-{
-  return max_level > 0
-    ? M_PI_F * (float)level / (float)max_level - M_PI_F / 2.0f
-    : 0.0f;
-}
-
 // Squared cosine/sine crossfade weight of a given band (clarity/texture/details) at position t
-static inline float band_weight(const dt_iop_contrastntexture_details_display_t band, const float t)
+static inline float band_weight(const dt_iop_contrastntexture_details_display_t band, const int level, const float max_level)
 {
-  if(band == DT_LC_MASK_TEXTURE) return cosf(t) * cosf(t);
-  if(band == DT_LC_MASK_CLARITY) return t < 0.0f ? sinf(t) * sinf(t) : 0.0f;
-  if(band == DT_LC_MASK_DETAILS) return t >= 0.0f ? sinf(t) * sinf(t) : 0.0f;
-  return 0.0f;
+  float t = (float)level / max_level - 0.5f;
+  t = fmaxf(fminf(t, 0.5f), -0.5f);
+  
+  float weight = 0.0f;
+  switch(band)
+  {
+    case DT_LC_MASK_TEXTURE: weight = cosf(M_PI_F * t); break;
+    case DT_LC_MASK_CLARITY: weight = t < 0.0f ? sinf(M_PI_F * t) : 0.0f; break;
+    case DT_LC_MASK_DETAILS: weight = t >= 0.0f ? sinf(M_PI_F * t) : 0.0f; break;
+    default: weight = 0.0f; break;
+  }
+  return weight * weight;
 }
 
 // Apply shadow and highlight enhancement
@@ -381,9 +378,9 @@ void process(dt_iop_module_t *self,
     display_mask = true;
     piece->pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
     // Preview the displayed band alone, at full strength, across all pyramid levels
-    for(int level = 0; level <= d->max_level; level++)
+    for(int level = 0; level <= d->max_used_level; level++)
     {
-      gain_per_level[level] = band_weight(g->details_display, level_to_t(level, d->max_level));
+      gain_per_level[level] = band_weight(g->details_display, level, d->max_detail_level);
     }
   }
   else
@@ -391,21 +388,19 @@ void process(dt_iop_module_t *self,
     // Smoothly interpolate the 3 sliders (clarity/texture/details) across all pyramid
     // levels using squared cosine/sine crossfade weights, so neighboring levels blend
     // instead of jumping discretely between the 3 gains.
-    for(int level = 0; level <= d->max_level; level++)
+    for(int level = 0; level <= d->max_used_level; level++)
     {
-      const float t = level_to_t(level, d->max_level);
-      gain_per_level[level] = band_weight(DT_LC_MASK_TEXTURE, t) * d->gain_details[DT_LC_MASK_TEXTURE]
-        + band_weight(DT_LC_MASK_CLARITY, t) * d->gain_details[DT_LC_MASK_CLARITY]
-        + band_weight(DT_LC_MASK_DETAILS, t) * d->gain_details[DT_LC_MASK_DETAILS];
+      for(int band = 0; band < DT_LC_MASK_LAST; band++)
+      gain_per_level[level] += d->gain_details[band] * band_weight(band, level, d->max_detail_level);
     }
   }
 
   compute_luminance(in, luminance_lowpass, roi_in, d);
   memset(corrections, 0, npixels * sizeof(float));
 
-  for(int level = d->max_level; level >= 0; level--)
+  for(int level = d->max_used_level; level >= 0; level--)
   {
-    dt_print(DT_DEBUG_PIPE, "Level + %i, Filter radius %i", level, d->radius_details[level]);
+    dt_print(DT_DEBUG_PIPE, "Level + %i, Filter radius %f", level, d->radius_details[level]);
     memcpy(luminance_highpass, luminance_lowpass, npixels * sizeof(float));
     compute_mask(luminance_lowpass, roi_in, d, level);
     
@@ -454,21 +449,22 @@ void modify_roi_in(dt_iop_module_t *self,
   const float max_size = (float)((piece->iwidth > piece->iheight) ? piece->iwidth : piece->iheight);
   for(int level = 0; level < MAX_ITERATIONS; level++)
   {
-    const float base_diameter = fminf(d->scale_details[level], 0.5f) * max_size * roi_in->scale;
-    const int radius = (int)((base_diameter - 1.0f) / 2.0f);
+    const float base_diameter = max_size * roi_in->scale;
+    const float radius = 0.5f * fminf(d->scale_details[level], 0.5f) * base_diameter;
     d->radius_details[level] = radius;
   }
 
   // Find the smallest level with non zero radius.
-  d->max_level = MAX_ITERATIONS - 1;
+  d->max_used_level = MAX_ITERATIONS - 1;
   for(int level = MAX_ITERATIONS - 1; level >= 0; level--)
   {
-    dt_print(DT_DEBUG_PIPE, "Max level used %i", d->max_level);
-    if(d->radius_details[level] == 0)
+    // If the radius is <2.0 pixels, the next level will be unused (<1.0)
+    if(d->radius_details[level] < 2.0f)
     {
-      d->max_level = level;
+      d->max_used_level = level;
     }
-  } 
+  }
+  dt_print(DT_DEBUG_PIPE, "Max level used %i", d->max_used_level);
 }
 
 void commit_params(dt_iop_module_t *self,
@@ -478,15 +474,13 @@ void commit_params(dt_iop_module_t *self,
 {
   const dt_iop_contrastntexture_params_t *p = (dt_iop_contrastntexture_params_t *)p1;
   dt_iop_contrastntexture_data_t *d = piece->data;
-
-  d->iterations = 1; //p->filter_iterations;
   d->noise_bias = p->noise_bias;
 
   d->gain_details[DT_LC_MASK_CLARITY] = p->gain_clarity;
   d->gain_details[DT_LC_MASK_TEXTURE] = p->gain_texture;
   d->gain_details[DT_LC_MASK_DETAILS] = p->gain_details;
 
-  // Log slope of shadows andhighlights, .i.e. the power the modify them with.
+  // Log slope of shadows and highlights, .i.e. the power the modify them with.
   d->slope_shadows = powf(2.0f, -p->gain_shadows);
   d->slope_highlights = powf(2.0f, p->gain_highlights);
 
@@ -499,15 +493,18 @@ void commit_params(dt_iop_module_t *self,
 
   // UI contrast scale is inverse logarithmic with 0 as 100% of image width.
   // Convert it to a linear scale for processing. Scales are separated by powers of 2 for each step in the UI.
-  for(size_t level = 0; level < MAX_ITERATIONS; level++)
+  for(int level = 0; level < MAX_ITERATIONS; level++)
   {
     d->scale_details[level] = powf(2.0f, -p->detail_level - (float)level);
   }
 
+  const float max_piece_size = (float)((piece->iwidth > piece->iheight) ? piece->iwidth : piece->iheight);
+  const float max_image_size = max_piece_size * piece->iscale;
+  d->max_detail_level = log2f(max_image_size) - p->detail_level - 1.0f;
+
   // UI feathering is inverted (higher = stricter edge preservation).
-  // Adjust the strength based on the number of iterations to maintain a consistent overall effect regardless of iteration count.
   const float default_feathering = 0.2f;  // Base value based on Christian's experiments for a good balance of edge preservation and contrast boost at default settings.
-  d->feathering = default_feathering * powf(2.0f, -p->edge_protection) / (d->iterations * d->iterations);
+  d->feathering = default_feathering * powf(2.0f, -p->edge_protection);
 }
 
 // The default implementation sizes piece->data by params_size, which is only correct while the data struct
@@ -644,12 +641,6 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->edge_protection, _("adjust the edge sensitivity of the filter\n"
                                                     "higher = more edge preservation\n"
                                                     "lower = smoother transitions, but may lead to halos around edges"));
-
-  // Disable the filter iterations when we test the recursice method                                                  
-  // g->filter_iterations = dt_bauhaus_slider_from_params(self, "filter_iterations");
-  // dt_bauhaus_slider_set_soft_range(g->filter_iterations, 1, 5);
-  // gtk_widget_set_tooltip_text(g->filter_iterations, _("number of passes of the guided filter to apply\n"
-  //      "helps diffusing the edges of the filter at the expense of speed"));
 
   g->noise_bias = dt_bauhaus_slider_from_params(self, "noise_bias");
   dt_bauhaus_slider_set_soft_range(g->noise_bias, 0.0, 0.2);
