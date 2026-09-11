@@ -75,11 +75,11 @@ DT_MODULE_INTROSPECTION(2, dt_iop_contrastntexture_params_t)
 
 typedef struct dt_iop_contrastntexture_params_t
 {
-  float gain_clarity;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "clarity"
-  float gain_texture;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "texture"
-  float gain_details;   // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "details"
-  float detail_level;   // $MIN: 1.0 $MAX: 15.0 $DEFAULT: 5.0 $DESCRIPTION: "base detail level"
-  float edge_protection; // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "adjust edge protection"
+  float gain_coarse;     // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "coarse"
+  float gain_medium;     // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "medium"
+  float gain_fine;       // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "fine"
+  float detail_level;    // $MIN: 1.0 $MAX: 15.0 $DEFAULT: 5.0 $DESCRIPTION: "base detail level"
+  float halo_control;    // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "halo control"
   float noise_bias;      // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
   float gain_shadows;    // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "shadows"
   float gain_highlights; // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "highlights"
@@ -88,9 +88,9 @@ typedef struct dt_iop_contrastntexture_params_t
 typedef enum dt_iop_contrastntexture_details_display_t
 {
   DT_LC_MASK_OFF = -1,
-  DT_LC_MASK_CLARITY = 0,
-  DT_LC_MASK_TEXTURE = 1,
-  DT_LC_MASK_DETAILS = 2,
+  DT_LC_MASK_COARSE = 0,
+  DT_LC_MASK_MEDIUM = 1,
+  DT_LC_MASK_FINE = 2,
   DT_LC_MASK_LAST = 3
 } dt_iop_contrastntexture_details_display_t;
 
@@ -118,13 +118,13 @@ typedef struct dt_iop_contrastntexture_gui_data_t
   dt_iop_contrastntexture_details_display_t details_display;
 
   // GTK widgets adjustments
-  GtkWidget *gain_details[DT_LC_MASK_LAST]; // clarity, texture, and details
+  GtkWidget *gain_details[DT_LC_MASK_LAST]; // coarse, medium, and fine
   GtkWidget *gain_shadows;
   GtkWidget *gain_highlights;
 
   // GTK widgets filter settings
   GtkWidget *detail_level;
-  GtkWidget *edge_protection;
+  GtkWidget *halo_control;
   GtkWidget *noise_bias;
 } dt_iop_contrastntexture_gui_data_t;
 
@@ -186,11 +186,11 @@ int legacy_params(dt_iop_module_t *self,
 
     dt_iop_contrastntexture_params_v1_t *o = (dt_iop_contrastntexture_params_v1_t *)old_params;
     dt_iop_contrastntexture_params_t *n = malloc(sizeof(dt_iop_contrastntexture_params_t));
-    n->gain_clarity = o->gain_local_contrast - 1.0f;
-    n->gain_texture = o->gain_local_contrast - 1.0f;
-    n->gain_details = o->gain_local_contrast - 1.0f;
+    n->gain_coarse = o->gain_local_contrast - 1.0f;
+    n->gain_medium = o->gain_local_contrast - 1.0f;
+    n->gain_fine = o->gain_local_contrast - 1.0f;
     n->detail_level = o->detail_level;
-    n->edge_protection = o->edge_protection;
+    n->halo_control = -o->edge_protection;
     n->noise_bias = o->noise_bias;
 
     *new_params = n;
@@ -255,7 +255,7 @@ static inline float extract_details(const float luminance_pixel,
   return weiner_gain * fmaxf(fminf(log_pixel - log_smoothed, 5.0f), -5.0f);
 }
 
-// Squared cosine/sine crossfade weight of a given band (clarity/texture/details) at position t
+// Squared cosine/sine crossfade weight of a given band (coarse/medium/fine) at position t
 static inline float band_weight(const dt_iop_contrastntexture_details_display_t band, const int level, const float max_level)
 {
   float t = (float)level / max_level - 0.5f;
@@ -264,9 +264,9 @@ static inline float band_weight(const dt_iop_contrastntexture_details_display_t 
   float weight = 0.0f;
   switch(band)
   {
-    case DT_LC_MASK_TEXTURE: weight = cosf(M_PI_F * t); break;
-    case DT_LC_MASK_CLARITY: weight = t < 0.0f ? sinf(M_PI_F * t) : 0.0f; break;
-    case DT_LC_MASK_DETAILS: weight = t >= 0.0f ? sinf(M_PI_F * t) : 0.0f; break;
+    case DT_LC_MASK_COARSE: weight = t < 0.0f ? sinf(M_PI_F * t) : 0.0f; break;
+    case DT_LC_MASK_MEDIUM: weight = cosf(M_PI_F * t); break;
+    case DT_LC_MASK_FINE: weight = t >= 0.0f ? sinf(M_PI_F * t) : 0.0f; break;
     default: weight = 0.0f; break;
   }
   return weight * weight;
@@ -385,7 +385,7 @@ void process(dt_iop_module_t *self,
   }
   else
   {
-    // Smoothly interpolate the 3 sliders (clarity/texture/details) across all pyramid
+    // Smoothly interpolate the 3 sliders (coarse/medium/fine) across all pyramid
     // levels using squared cosine/sine crossfade weights, so neighboring levels blend
     // instead of jumping discretely between the 3 gains.
     for(int level = 0; level <= d->max_used_level; level++)
@@ -476,9 +476,9 @@ void commit_params(dt_iop_module_t *self,
   dt_iop_contrastntexture_data_t *d = piece->data;
   d->noise_bias = p->noise_bias;
 
-  d->gain_details[DT_LC_MASK_CLARITY] = p->gain_clarity;
-  d->gain_details[DT_LC_MASK_TEXTURE] = p->gain_texture;
-  d->gain_details[DT_LC_MASK_DETAILS] = p->gain_details;
+  d->gain_details[DT_LC_MASK_COARSE] = p->gain_coarse;
+  d->gain_details[DT_LC_MASK_MEDIUM] = p->gain_medium;
+  d->gain_details[DT_LC_MASK_FINE] = p->gain_fine;
 
   // Log slope of shadows and highlights, .i.e. the power the modify them with.
   d->slope_shadows = powf(2.0f, -p->gain_shadows);
@@ -502,9 +502,9 @@ void commit_params(dt_iop_module_t *self,
   const float max_image_size = max_piece_size * piece->iscale;
   d->max_detail_level = log2f(max_image_size) - p->detail_level - 1.0f;
 
-  // UI feathering is inverted (higher = stricter edge preservation).
-  const float default_feathering = 0.2f;  // Base value based on Christian's experiments for a good balance of edge preservation and contrast boost at default settings.
-  d->feathering = default_feathering * powf(2.0f, -p->edge_protection);
+  // UI feathering is inverted (higher = stricter halo control).
+  const float default_feathering = 0.2f;  // Base value based on Christian's experiments for a good balance of halo control and contrast boost at default settings.
+  d->feathering = default_feathering * powf(2.0f, p->halo_control);
 }
 
 // The default implementation sizes piece->data by params_size, which is only correct while the data struct
@@ -603,7 +603,7 @@ void gui_init(dt_iop_module_t *self)
   dt_gui_box_add(self->widget, dt_ui_section_label_new(_("local contrast")));
   
   // Details boost sliders
-  const char *labels[DT_LC_MASK_LAST] = {"gain_clarity", "gain_texture", "gain_details"};
+  const char *labels[DT_LC_MASK_LAST] = {"gain_coarse", "gain_medium", "gain_fine"};
   for(int i = 0; i < DT_LC_MASK_LAST; i++)
   {
     g->gain_details[i] = dt_bauhaus_slider_from_params(self, labels[i]);
@@ -612,35 +612,35 @@ void gui_init(dt_iop_module_t *self)
     dt_bauhaus_slider_set_format(g->gain_details[i], "%");
     dt_bauhaus_slider_set_factor(g->gain_details[i], 100.0);
   }
-  gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_CLARITY],
-                              _("adjust clarity, low frequency content.\n"
+  gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_COARSE],
+                              _("adjust coarse, low frequency content.\n"
                                 "press the mask button to preview the effect."));
-  dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_CLARITY], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
-                             _("preview where clarity is applied."));
+  dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_COARSE], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
+                             _("preview where coarse is applied."));
   
-  gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_TEXTURE],
-                              _("adjust texture, frequency content between clarity and details.\n"
+  gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_MEDIUM],
+                              _("adjust medium, frequency content between coarse and fine.\n"
                                 "press the mask button to preview the effect."));
-  dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_TEXTURE], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
-                             _("preview where texture is applied."));
+  dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_MEDIUM], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
+                             _("preview where medium is applied."));
 
-  gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_DETAILS],
-                              _("adjust details, high frequency content.\n"
+  gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_FINE],
+                              _("adjust fine, high frequency content.\n"
                                 "press the mask button to preview the effect."));
-  dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_DETAILS], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
-                             _("preview where details are applied."));
+  dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_FINE], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
+                             _("preview where fine is applied."));
 
   // Filter settings section
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "filter settings")));
 
-  g->edge_protection = dt_bauhaus_slider_from_params(self, "edge_protection");
-  dt_bauhaus_slider_set_soft_range(g->edge_protection, -5.0, 5.0);
-  dt_bauhaus_slider_set_digits(g->edge_protection, 2);
-  dt_bauhaus_slider_set_format(g->edge_protection, "%");
-  dt_bauhaus_slider_set_factor(g->edge_protection, 100.0);
-  gtk_widget_set_tooltip_text(g->edge_protection, _("adjust the edge sensitivity of the filter\n"
-                                                    "higher = more edge preservation\n"
-                                                    "lower = smoother transitions, but may lead to halos around edges"));
+  g->halo_control = dt_bauhaus_slider_from_params(self, "halo_control");
+  dt_bauhaus_slider_set_soft_range(g->halo_control, -5.0, 5.0);
+  dt_bauhaus_slider_set_digits(g->halo_control, 2);
+  dt_bauhaus_slider_set_format(g->halo_control, "%");
+  dt_bauhaus_slider_set_factor(g->halo_control, 100.0);
+  gtk_widget_set_tooltip_text(g->halo_control, _("adjust the halo control of the filter.\n"
+                                                 "higher = allow more halos to get more local contrast and details.\n"
+                                                 "lower = suppress halos at the expense of details around edges."));
 
   g->noise_bias = dt_bauhaus_slider_from_params(self, "noise_bias");
   dt_bauhaus_slider_set_soft_range(g->noise_bias, 0.0, 0.2);
