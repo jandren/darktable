@@ -105,7 +105,7 @@ typedef struct dt_iop_contrastntexture_data_t
   float max_detail_level;
   int   max_used_level;
   float feathering;
-  float noise_bias;
+  float noise_bias[MAX_ITERATIONS];
   float slope_shadows;
   float slope_highlights;
   float midtones_width;
@@ -206,7 +206,7 @@ __DT_CLONE_TARGETS__
 static inline void compute_luminance(const float *const restrict in,
                                       float *const restrict luminance,
                                       const dt_iop_roi_t *const roi_in,
-                                      const dt_iop_contrastntexture_data_t *const d)
+                                      const float noise_bias)
 {
   const size_t width = (size_t)roi_in->width;
   const size_t height = (size_t)roi_in->height;
@@ -214,7 +214,6 @@ static inline void compute_luminance(const float *const restrict in,
 
   // First compute pixel-wise luminance (no boost) and add noise bias
   luminance_mask(in, luminance, width, height, DT_TONEEQ_NORM_2, 1.0f, 0.0f, 1.0f);
-  const float noise_bias = d->noise_bias;
 
   DT_OMP_FOR()
   for(size_t k = 0; k < npixels; k++)
@@ -276,7 +275,7 @@ static inline float band_weight(const dt_iop_contrastntexture_details_display_t 
 // Different slopes for shadows and highlights, with a smooth transition in the midtones
 __DT_CLONE_TARGETS__
 static inline float apply_shadows_highlights(const float luminance_lowpass,
-                                            const dt_iop_contrastntexture_data_t *const d)
+                                             const dt_iop_contrastntexture_data_t *const d)
 {
   const float slope_shadows = d->slope_shadows;
   const float slope_highlights = d->slope_highlights;
@@ -284,7 +283,7 @@ static inline float apply_shadows_highlights(const float luminance_lowpass,
   const float a0 = d->midtones_polynomial[0];
   const float a1 = d->midtones_polynomial[1];
   const float a2 = d->midtones_polynomial[2];
-  const float noise_bias = d->noise_bias;
+  const float noise_bias = d->noise_bias[0]; // Applied on the top level
   const float pivot_offset = log2f(noise_bias + 0.1845f);
 
   float correction_ev = 0.0f;
@@ -395,12 +394,13 @@ void process(dt_iop_module_t *self,
     }
   }
 
-  compute_luminance(in, luminance_lowpass, roi_in, d);
+  const float max_noise_bias = d->noise_bias[d->max_used_level];
+  compute_luminance(in, luminance_lowpass, roi_in, max_noise_bias);
   memset(corrections, 0, npixels * sizeof(float));
 
   for(int level = d->max_used_level; level >= 0; level--)
   {
-    dt_print(DT_DEBUG_PIPE, "Level + %i, Filter radius %f", level, d->radius_details[level]);
+    dt_print(DT_DEBUG_PIPE, "Level + %i, Filter radius %f, Noise bias %f", level, d->radius_details[level], d->noise_bias[level]);
     memcpy(luminance_highpass, luminance_lowpass, npixels * sizeof(float));
     compute_mask(luminance_lowpass, roi_in, d, level);
     
@@ -408,7 +408,11 @@ void process(dt_iop_module_t *self,
     for(size_t k = 0; k < npixels; k++)
     {
       // Details as the bandpass difference
-      corrections[k] += gain_per_level[level] * extract_details(luminance_highpass[k], luminance_lowpass[k], d->noise_bias);
+      corrections[k] += gain_per_level[level] * extract_details(luminance_highpass[k], luminance_lowpass[k], d->noise_bias[level]);
+      
+      // Reduce the noise bias to the next level
+      if(level > 0)
+        luminance_lowpass[k] -= d->noise_bias[level] - d->noise_bias[level - 1];
     }
   }  
 
@@ -464,7 +468,6 @@ void modify_roi_in(dt_iop_module_t *self,
       d->max_used_level = level;
     }
   }
-  dt_print(DT_DEBUG_PIPE, "Max level used %i", d->max_used_level);
 }
 
 void commit_params(dt_iop_module_t *self,
@@ -474,7 +477,6 @@ void commit_params(dt_iop_module_t *self,
 {
   const dt_iop_contrastntexture_params_t *p = (dt_iop_contrastntexture_params_t *)p1;
   dt_iop_contrastntexture_data_t *d = piece->data;
-  d->noise_bias = p->noise_bias;
 
   d->gain_details[DT_LC_MASK_COARSE] = p->gain_coarse;
   d->gain_details[DT_LC_MASK_MEDIUM] = p->gain_medium;
@@ -491,16 +493,17 @@ void commit_params(dt_iop_module_t *self,
   d->midtones_polynomial[1] = d->slope_shadows;
   d->midtones_polynomial[2] = (d->slope_highlights - d->slope_shadows) / (4.0f * d->midtones_width);
 
+  const float max_piece_size = (float)((piece->iwidth > piece->iheight) ? piece->iwidth : piece->iheight);
+  const float max_image_size = max_piece_size * piece->iscale;
+  d->max_detail_level = log2f(max_image_size) - p->detail_level - 1.0f;
+
   // UI contrast scale is inverse logarithmic with 0 as 100% of image width.
   // Convert it to a linear scale for processing. Scales are separated by powers of 2 for each step in the UI.
   for(int level = 0; level < MAX_ITERATIONS; level++)
   {
     d->scale_details[level] = powf(2.0f, -p->detail_level - (float)level);
+    d->noise_bias[level] = p->noise_bias * powf(2.0f, fminf((float)level - d->max_detail_level, 0.0f));
   }
-
-  const float max_piece_size = (float)((piece->iwidth > piece->iheight) ? piece->iwidth : piece->iheight);
-  const float max_image_size = max_piece_size * piece->iscale;
-  d->max_detail_level = log2f(max_image_size) - p->detail_level - 1.0f;
 
   // UI feathering is inverted (higher = stricter halo control).
   const float default_feathering = 0.2f;  // Base value based on Christian's experiments for a good balance of halo control and contrast boost at default settings.
