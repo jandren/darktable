@@ -570,17 +570,6 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   dt_iop_refresh_center(self);
 }
 
-void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-  piece->data = calloc(1, sizeof(dt_iop_contrastntexture_data_t));
-}
-
-void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-  free(piece->data);
-  piece->data = NULL;
-}
-
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_contrastntexture_gui_data_t *g = IOP_GUI_ALLOC(contrastntexture);
