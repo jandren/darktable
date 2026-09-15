@@ -75,9 +75,9 @@ DT_MODULE_INTROSPECTION(2, dt_iop_contrastntexture_params_t)
 
 typedef struct dt_iop_contrastntexture_params_t
 {
-  float gain_coarse;     // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "coarse"
-  float gain_medium;     // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "medium"
-  float gain_fine;       // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "fine"
+  float gain_coarse;     // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "coarse details"
+  float gain_medium;     // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "medium details"
+  float gain_fine;       // $MIN: -1.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "fine details"
   float detail_level;    // $MIN: 1.0 $MAX: 15.0 $DEFAULT: 5.0 $DESCRIPTION: "base detail level"
   float halo_control;    // $MIN: -10.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "halo control"
   float noise_bias;      // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
@@ -136,7 +136,7 @@ const char *name()
 
 const char *aliases()
 {
-  return _("local contrast|texture|clarity|detail enhancement");
+  return _("local contrast|texture|clarity|detail enhancement|highlights and shadows");
 }
 
 const char **description(dt_iop_module_t *self)
@@ -192,6 +192,8 @@ int legacy_params(dt_iop_module_t *self,
     n->detail_level = o->detail_level;
     n->halo_control = -o->edge_protection;
     n->noise_bias = o->noise_bias;
+    n->gain_highlights = 0.0f;
+    n->gain_shadows = 0.0f;
 
     *new_params = n;
     *new_params_size = sizeof(dt_iop_contrastntexture_params_t);
@@ -283,7 +285,7 @@ static inline float apply_shadows_highlights(const float luminance_lowpass,
   const float a0 = d->midtones_polynomial[0];
   const float a1 = d->midtones_polynomial[1];
   const float a2 = d->midtones_polynomial[2];
-  const float noise_bias = d->noise_bias[0]; // Applied on the top level
+  const float noise_bias = d->noise_bias[0]; // Applied on the base level
   const float pivot_offset = log2f(noise_bias + 0.1845f);
 
   float correction_ev = 0.0f;
@@ -313,7 +315,7 @@ static inline void display_local_mask(const float *const restrict corrections,
                                       float *const restrict out,
                                       const dt_iop_roi_t *const roi_in)
 {
-  const size_t npixels = (size_t)roi_in->width * roi_in->height;
+  const size_t npixels = roi_in->width * roi_in->height;
 
   DT_OMP_FOR()
   for(size_t k = 0; k < npixels; k++)
@@ -344,31 +346,32 @@ void process(dt_iop_module_t *self,
   const dt_iop_contrastntexture_data_t *const d = piece->data;
   dt_iop_contrastntexture_gui_data_t *const g = self->gui_data;
 
+  // Validate input format
+  if(!dt_iop_have_required_input_format(4, self, piece->colors,
+                                        ivoid, ovoid, roi_in, roi_out))
+    return;
+
   const float *const restrict in = (float *const)ivoid;
   float *const restrict out = (float *const)ovoid;
 
-  const size_t width = roi_in->width;
-  const size_t height = roi_in->height;
-  const size_t npixels = width * height;
-
+  const size_t npixels = roi_in->width * roi_in->height;
   float *restrict luminance_highpass = dt_alloc_align_float(npixels);
   float *restrict luminance_lowpass = dt_alloc_align_float(npixels);
   float *restrict corrections = dt_alloc_align_float(npixels);
-  float *restrict gain_per_level = dt_alloc_align_float(MAX_ITERATIONS);
-
   if(!luminance_lowpass ||
      !luminance_highpass ||
-     !corrections ||
-     !gain_per_level)
+     !corrections)
   {
     dt_control_log(_("contrast and texture failed to allocate memory, check your RAM settings"));
     dt_free_align(luminance_highpass);
     dt_free_align(luminance_lowpass);
     dt_free_align(corrections);
-    dt_free_align(gain_per_level);
     return;
   }
-  memset(gain_per_level, 0, MAX_ITERATIONS * sizeof(float));
+
+  // The actual gain per level is computed in process instead of commit params
+  // as its affected by the dispaly mask option.
+  float gain_per_level[MAX_ITERATIONS] = { 0.0f };
 
   // Display output
   bool display_mask = false;
@@ -439,7 +442,6 @@ void process(dt_iop_module_t *self,
   dt_free_align(luminance_highpass);
   dt_free_align(luminance_lowpass);
   dt_free_align(corrections);
-  dt_free_align(gain_per_level);
 }
 
 void modify_roi_in(dt_iop_module_t *self,
@@ -499,6 +501,7 @@ void commit_params(dt_iop_module_t *self,
 
   // UI contrast scale is inverse logarithmic with 0 as 100% of image width.
   // Convert it to a linear scale for processing. Scales are separated by powers of 2 for each step in the UI.
+  // The noise bias is reduced for each level in the pyramid.
   for(int level = 0; level < MAX_ITERATIONS; level++)
   {
     d->scale_details[level] = powf(2.0f, -p->detail_level - (float)level);
@@ -589,7 +592,7 @@ void gui_init(dt_iop_module_t *self)
   g->detail_level = dt_bauhaus_slider_from_params(self, "detail_level");
   dt_bauhaus_slider_set_soft_range(g->detail_level, 1.0, 10.0);
   gtk_widget_set_tooltip_text(g->detail_level,
-     _("base detail level adjusted by the course contrast.\n"
+     _("adjust the detail level used for highlights, shadows, and coarse details.\n"
        "higher = more contrast boost in finer details\n"
        "lower = more contrast boost in coarser details"));
 
@@ -597,11 +600,11 @@ void gui_init(dt_iop_module_t *self)
   g->gain_highlights = dt_bauhaus_slider_from_params(self, "gain_highlights");
   dt_bauhaus_slider_set_soft_range(g->gain_highlights, -2.0, 2.0);
   gtk_widget_set_tooltip_text(g->gain_highlights,
-    _("adjust highlights based on the base detail level."));
+    _("adjust highlights at the base detail level size."));
   g->gain_shadows = dt_bauhaus_slider_from_params(self, "gain_shadows");
   dt_bauhaus_slider_set_soft_range(g->gain_shadows, -2.0, 2.0);
   gtk_widget_set_tooltip_text(g->gain_shadows,
-    _("adjust shadows based on the base detail level."));
+    _("adjust shadows at the base detail level size."));
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(_("local contrast")));
   
@@ -619,19 +622,19 @@ void gui_init(dt_iop_module_t *self)
                               _("adjust coarse, low frequency content.\n"
                                 "press the mask button to preview the effect."));
   dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_COARSE], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
-                             _("preview where coarse is applied."));
+                             _("preview the size of the coarse details to adjust."));
   
   gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_MEDIUM],
                               _("adjust medium, frequency content between coarse and fine.\n"
                                 "press the mask button to preview the effect."));
   dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_MEDIUM], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
-                             _("preview where medium is applied."));
+                             _("preview the size of the medium details to adjust."));
 
   gtk_widget_set_tooltip_text(g->gain_details[DT_LC_MASK_FINE],
                               _("adjust fine, high frequency content.\n"
                                 "press the mask button to preview the effect."));
   dt_bauhaus_widget_set_quad(g->gain_details[DT_LC_MASK_FINE], self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
-                             _("preview where fine is applied."));
+                             _("preview the size of the fine details to adjust."));
 
   // Filter settings section
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "filter settings")));
