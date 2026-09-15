@@ -570,6 +570,20 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   dt_iop_refresh_center(self);
 }
 
+void gui_focus(dt_iop_module_t *self, const gboolean in)
+{
+  if(!in)
+  {
+    dt_iop_contrastntexture_gui_data_t *g = self->gui_data;
+    const gboolean was_mask = g->details_display != DT_LC_MASK_OFF;
+    g->details_display = DT_LC_MASK_OFF;
+    for(int i = 0; i < DT_LC_MASK_LAST; i++)
+      dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[i]), FALSE);
+    if(was_mask)
+      dt_iop_refresh_center(self);
+  }
+}
+
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_contrastntexture_gui_data_t *g = IOP_GUI_ALLOC(contrastntexture);
