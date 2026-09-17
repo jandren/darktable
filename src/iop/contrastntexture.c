@@ -336,6 +336,41 @@ static inline void display_local_mask(const float *const restrict corrections,
   }
 }
 
+/*
+ Display the final low pass filter result with a tint, i.e. the value fed into the
+ shadows (blue) and highlights (yellow) control, mapped to linear [0, 1].
+ */
+__DT_CLONE_TARGETS__
+static inline void display_lowpass_mask(const float *const restrict luminance_lowpass,
+                                        float *const restrict out,
+                                        const dt_iop_roi_t *const roi_in,
+                                        const dt_iop_contrastntexture_data_t *const d)
+{
+  const size_t npixels = roi_in->width * roi_in->height;
+  const float pivot_offset = d->noise_bias[0] + 0.1845f;
+
+  const dt_aligned_pixel_t blue = {0.0f, 0.0f, 1.0f};
+  const dt_aligned_pixel_t yellow = {1.0f, 1.0f, 0.0f};
+
+  DT_OMP_FOR()
+  for(size_t k = 0; k < npixels; k++)
+  {
+    // Low contrast sigmoid for the preview.
+    const float intensity = luminance_lowpass[k] / (pivot_offset + luminance_lowpass[k]);
+    float saturation = (intensity - 0.5f) * 2.0f;
+    saturation *= saturation;
+
+    for_each_channel(c)
+    {
+      if(intensity < 0.5f)
+        out[4 * k + c] = intensity * ((1.0f - saturation) + saturation * blue[c]);
+      else
+        out[4 * k + c] = intensity * ((1.0f - saturation) + saturation * yellow[c]);
+    }
+    out[4 * k + 3] = 1.0f;
+  }
+}
+
 void process(dt_iop_module_t *self,
              dt_dev_pixelpipe_iop_t *piece,
              const void *const restrict ivoid,
@@ -380,9 +415,13 @@ void process(dt_iop_module_t *self,
     display_mask = true;
     piece->pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
     // Preview the displayed band alone, at full strength, across all pyramid levels
-    for(int level = 0; level <= d->max_used_level; level++)
+    // (the lowpass preview does not use band weights, the final luminance_lowpass suffices)
+    if(g->details_display != DT_LC_MASK_LAST)
     {
-      gain_per_level[level] = band_weight(g->details_display, level, d->max_detail_level);
+      for(int level = 0; level <= d->max_used_level; level++)
+      {
+        gain_per_level[level] = band_weight(g->details_display, level, d->max_detail_level);
+      }
     }
   }
   else
@@ -421,7 +460,10 @@ void process(dt_iop_module_t *self,
 
   if(display_mask)
   {
-    display_local_mask(corrections, out, roi_in);
+    if(g->details_display == DT_LC_MASK_LAST)
+      display_lowpass_mask(luminance_lowpass, out, roi_in, d);
+    else
+      display_local_mask(corrections, out, roi_in);
   }
   else
   {
@@ -553,12 +595,19 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   const gboolean toggle_is_active = dt_bauhaus_widget_get_quad_active(GTK_WIDGET(togglebutton));
   if(toggle_is_active)
   {
-    for(int i = 0; i < DT_LC_MASK_LAST; i++)
+    if(togglebutton == g->detail_level)
     {
-      if(togglebutton == g->gain_details[i])
+      g->details_display = DT_LC_MASK_LAST;
+    }
+    else
+    {
+      for(int i = 0; i < DT_LC_MASK_LAST; i++)
       {
-        g->details_display = i;
-        break;
+        if(togglebutton == g->gain_details[i])
+        {
+          g->details_display = i;
+          break;
+        }
       }
     }
   }
@@ -567,6 +616,7 @@ static void show_details_callback(GtkWidget *togglebutton, dt_iop_module_t *self
   {
     dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[i]), g->details_display == i);
   }
+  dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->detail_level), g->details_display == DT_LC_MASK_LAST);
   dt_iop_refresh_center(self);
 }
 
@@ -579,6 +629,7 @@ void gui_focus(dt_iop_module_t *self, const gboolean in)
     g->details_display = DT_LC_MASK_OFF;
     for(int i = 0; i < DT_LC_MASK_LAST; i++)
       dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->gain_details[i]), FALSE);
+    dt_bauhaus_widget_set_quad_active(GTK_WIDGET(g->detail_level), FALSE);
     if(was_mask)
       dt_iop_refresh_center(self);
   }
@@ -597,7 +648,10 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->detail_level,
      _("adjust the detail level used for highlights, shadows, and coarse details.\n"
        "higher = more contrast boost in finer details\n"
-       "lower = more contrast boost in coarser details"));
+       "lower = more contrast boost in coarser details\n"
+       "press the mask button to preview the low pass filter result used for shadows/highlights."));
+  dt_bauhaus_widget_set_quad(g->detail_level, self, dtgtk_cairo_paint_showmask, TRUE, show_details_callback,
+                             _("preview the low pass filter result used for shadows(blue)/highlights(yellow)."));
 
   // Highlights and shadows sliders
   g->gain_highlights = dt_bauhaus_slider_from_params(self, "gain_highlights");
