@@ -185,9 +185,12 @@ int legacy_params(dt_iop_module_t *self,
 
     dt_iop_contrastntexture_params_v1_t *o = (dt_iop_contrastntexture_params_v1_t *)old_params;
     dt_iop_contrastntexture_params_t *n = malloc(sizeof(dt_iop_contrastntexture_params_t));
-    n->gain_coarse = o->gain_local_contrast - 1.0f;
-    n->gain_medium = o->gain_local_contrast - 1.0f;
-    n->gain_fine = o->gain_local_contrast - 1.0f;
+
+    // Do a best effort conversion from v1 to v2 to compensate for the increase detail extraction.
+    const float factor = o->gain_local_contrast > 1.0f ? fminf(0.1f + 0.95f * powf(0.1 * o->detail_level, 2), 1.0f) : 1.0f;
+    n->gain_coarse = factor * (o->gain_local_contrast - 1.0f);
+    n->gain_medium = factor * (o->gain_local_contrast - 1.0f);
+    n->gain_fine = factor * (o->gain_local_contrast - 1.0f);
     n->detail_level = o->detail_level;
     n->halo_control = o->edge_protection;
     n->noise_bias = o->noise_bias;
