@@ -47,6 +47,7 @@ Current status as implemented by Jandren:
 
 #include "bauhaus/bauhaus.h"
 #include "common/darktable.h"
+#include "common/fast_bilateral.h"
 #include "common/fast_guided_filter.h"
 #include "common/eigf.h"
 #include "common/luminance_mask.h"
@@ -71,7 +72,14 @@ Current status as implemented by Jandren:
 #include <omp.h>
 #endif
 
-DT_MODULE_INTROSPECTION(2, dt_iop_contrastntexture_params_t)
+DT_MODULE_INTROSPECTION(3, dt_iop_contrastntexture_params_t)
+
+typedef enum dt_iop_contrastntexture_filter_t
+{
+  DT_LC_FILTER_EIGF = 0,      // $DESCRIPTION: "eigf (edge preserving)"
+  DT_LC_FILTER_GUIDED = 1,    // $DESCRIPTION: "guided filter"
+  DT_LC_FILTER_BILATERAL = 2  // $DESCRIPTION: "bilateral filter"
+} dt_iop_contrastntexture_filter_t;
 
 typedef struct dt_iop_contrastntexture_params_t
 {
@@ -83,6 +91,7 @@ typedef struct dt_iop_contrastntexture_params_t
   float noise_bias;      // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.001 $DESCRIPTION: "noise bias"
   float gain_shadows;    // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "shadows"
   float gain_highlights; // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "highlights"
+  dt_iop_contrastntexture_filter_t filter_type; // $DEFAULT: DT_LC_FILTER_EIGF $DESCRIPTION: "detail filter"
 } dt_iop_contrastntexture_params_t;
 
 typedef enum dt_iop_contrastntexture_details_display_t
@@ -109,6 +118,7 @@ typedef struct dt_iop_contrastntexture_data_t
   float slope_highlights;
   float midtones_width;
   float midtones_polynomial[3];
+  dt_iop_contrastntexture_filter_t filter_type;
 } dt_iop_contrastntexture_data_t;
 
 typedef struct dt_iop_contrastntexture_gui_data_t
@@ -123,6 +133,7 @@ typedef struct dt_iop_contrastntexture_gui_data_t
 
   // GTK widgets filter settings
   GtkWidget *detail_level;
+  GtkWidget *filter_type;
   GtkWidget *halo_control;
   GtkWidget *noise_bias;
 } dt_iop_contrastntexture_gui_data_t;
@@ -183,7 +194,7 @@ int legacy_params(dt_iop_module_t *self,
       float noise_bias;
     } dt_iop_contrastntexture_params_v1_t;
 
-    dt_iop_contrastntexture_params_v1_t *o = (dt_iop_contrastntexture_params_v1_t *)old_params;
+    const dt_iop_contrastntexture_params_v1_t *o = (dt_iop_contrastntexture_params_v1_t *)old_params;
     dt_iop_contrastntexture_params_t *n = malloc(sizeof(dt_iop_contrastntexture_params_t));
     n->gain_coarse = o->gain_local_contrast - 1.0f;
     n->gain_medium = o->gain_local_contrast - 1.0f;
@@ -193,12 +204,46 @@ int legacy_params(dt_iop_module_t *self,
     n->noise_bias = o->noise_bias;
     n->gain_highlights = 0.0f;
     n->gain_shadows = 0.0f;
+    n->filter_type = DT_LC_FILTER_EIGF;
 
     *new_params = n;
     *new_params_size = sizeof(dt_iop_contrastntexture_params_t);
-    *new_version = 2;
+    *new_version = 3;
     return 0;
   }
+
+  if(old_version == 2)
+  {
+    typedef struct dt_iop_contrastntexture_params_v2_t
+    {
+      float gain_coarse;
+      float gain_medium;
+      float gain_fine;
+      float detail_level;
+      float halo_control;
+      float noise_bias;
+      float gain_shadows;
+      float gain_highlights;
+    } dt_iop_contrastntexture_params_v2_t;
+
+    const dt_iop_contrastntexture_params_v2_t *o = (dt_iop_contrastntexture_params_v2_t *)old_params;
+    dt_iop_contrastntexture_params_t *n = malloc(sizeof(dt_iop_contrastntexture_params_t));
+    n->gain_coarse = o->gain_coarse;
+    n->gain_medium = o->gain_medium;
+    n->gain_fine = o->gain_fine;
+    n->detail_level = o->detail_level;
+    n->halo_control = o->halo_control;
+    n->noise_bias = o->noise_bias;
+    n->gain_shadows = o->gain_shadows;
+    n->gain_highlights = o->gain_highlights;
+    n->filter_type = DT_LC_FILTER_EIGF;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_contrastntexture_params_t);
+    *new_version = 3;
+    return 0;
+  }
+
   return 1;
 }
 
@@ -233,10 +278,46 @@ static inline void compute_mask(float *const restrict smoothed_luminance,
   const size_t width = (size_t)roi_in->width;
   const size_t height = (size_t)roi_in->height;
 
-  fast_eigf_surface_blur(smoothed_luminance, width, height,
-                         d->radius_details[level], d->feathering, 1,
-                         DT_GF_BLENDING_LINEAR, 1.0f,
-                         0.0f, NORM_MIN, 4.0f);
+  switch(d->filter_type)
+  {
+    case DT_LC_FILTER_GUIDED:
+      DT_OMP_FOR()
+      for(size_t k = 0; k < width * height; k++)
+      {
+        smoothed_luminance[k] = log2f(fmaxf(smoothed_luminance[k], NORM_MIN));
+      }
+      fast_log_surface_blur(smoothed_luminance, width, height,
+                            d->radius_details[level], d->feathering);
+      DT_OMP_FOR()
+      for(size_t k = 0; k < width * height; k++)
+      {
+        smoothed_luminance[k] = exp2f(smoothed_luminance[k]);
+      }
+      break;
+
+    case DT_LC_FILTER_BILATERAL:
+      DT_OMP_FOR()
+      for(size_t k = 0; k < width * height; k++)
+      {
+        smoothed_luminance[k] = log2f(smoothed_luminance[k]) + 10.0f;
+      }
+      dt_bilateral_surface_blur(smoothed_luminance, width, height,
+                                d->radius_details[level], d->feathering);
+      DT_OMP_FOR()
+      for(size_t k = 0; k < width * height; k++)
+      {
+        smoothed_luminance[k] = exp2f(smoothed_luminance[k] - 10.0f);
+      }
+      break;
+
+    case DT_LC_FILTER_EIGF:
+    default:
+      fast_eigf_surface_blur(smoothed_luminance, width, height,
+                             d->radius_details[level], d->feathering, 1,
+                             DT_GF_BLENDING_LINEAR, 1.0f,
+                             0.0f, NORM_MIN, 4.0f);
+      break;
+  }
 }
 
 // Extract logarithmic high pass detail in log space (EV):
@@ -534,6 +615,7 @@ void commit_params(dt_iop_module_t *self,
   d->gain_details[DT_LC_MASK_COARSE] = p->gain_coarse;
   d->gain_details[DT_LC_MASK_MEDIUM] = p->gain_medium;
   d->gain_details[DT_LC_MASK_FINE] = p->gain_fine;
+  d->filter_type = p->filter_type;
 
   // Log slope of shadows and highlights, .i.e. the power the modify them with.
   d->slope_shadows = powf(2.0f, -p->gain_shadows);
@@ -705,6 +787,12 @@ void gui_init(dt_iop_module_t *self)
 
   // Filter settings section
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "filter settings")));
+
+  g->filter_type = dt_bauhaus_combobox_from_params(self, "filter_type");
+  gtk_widget_set_tooltip_text(g->filter_type, _("edge-aware filter used to build the detail pyramid.\n"
+                                                "eigf (edge preserving) keeps sharper edges.\n"
+                                                "guided filter is faster but with softer edges.\n"
+                                                "bilateral filter is a slower alternative with its own edge behavior."));
 
   g->halo_control = dt_bauhaus_slider_from_params(self, "halo_control");
   dt_bauhaus_slider_set_soft_range(g->halo_control, -5.0, 5.0);

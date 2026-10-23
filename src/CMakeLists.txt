@@ -48,6 +48,7 @@ FILE(GLOB SOURCE_FILES
   "common/dynload.c"
   "common/eaw.c"
   "common/exif.cc"
+  "common/fast_bilateral.cc"
   "common/file_location.c"
   "common/film.c"
   "common/gaussian.c"

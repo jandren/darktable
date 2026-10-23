@@ -301,6 +301,79 @@ clean:
   dt_free_align(ds_image);
   dt_free_align(mask);
 }
+
+// Guided filter surface blur for log-luminance data (any sign), using gaussian
+// blurs on a downscaled image. Works in-place on a grey image, linear blending only.
+__DT_CLONE_TARGETS__
+static inline void fast_log_surface_blur(float *const restrict image,
+                                         const size_t width,
+                                         const size_t height,
+                                         const float sigma,
+                                         const float feathering)
+{
+  const float scaling = fmaxf(fminf(sigma, 4.0f), 1.0f);
+  const float ds_sigma = fmaxf(sigma / scaling, 1.0f);
+
+  const size_t ds_height = height / scaling;
+  const size_t ds_width = width / scaling;
+  const size_t num_elem_ds = ds_width * ds_height;
+  const size_t num_elem = width * height;
+
+  float *const restrict ds_image = dt_alloc_align_float(num_elem_ds);
+  float *const restrict in = dt_alloc_align_float(num_elem_ds * 2);
+  float *const restrict ds_av = dt_alloc_align_float(num_elem_ds * 2);
+  float *const restrict av = dt_alloc_align_float(num_elem * 2);
+
+  if(!ds_image || !in || !ds_av || !av)
+  {
+    dt_control_log(_("fast log surface blur failed to allocate memory, check your RAM settings"));
+    goto clean;
+  }
+
+  interpolate_bilinear(image, width, height, ds_image, ds_width, ds_height, 1);
+
+  // channels: value and squared value, with ranges for the gaussian
+  float ming = FLT_MAX;
+  float maxg = -FLT_MAX;
+  float maxg2 = 0.0f;
+  DT_OMP_FOR(reduction(max:maxg, maxg2) reduction(min:ming))
+  for(size_t k = 0; k < num_elem_ds; k++)
+  {
+    const float p = ds_image[k];
+    in[2 * k] = p;
+    in[2 * k + 1] = p * p;
+    ming = fminf(ming, p);
+    maxg = fmaxf(maxg, p);
+    maxg2 = fmaxf(maxg2, p * p);
+  }
+  // squares of values spanning zero have a minimum of 0
+  const float ming2 = (ming <= 0.0f && maxg >= 0.0f) ? 0.0f
+                      : fminf(ming * ming, maxg * maxg);
+
+  const float max[2] = { maxg, maxg2 };
+  const float min[2] = { ming, ming2 };
+  dt_gaussian_t *g = dt_gaussian_init(ds_width, ds_height, 2, max, min, ds_sigma, 0);
+  if(!g) goto clean;
+  dt_gaussian_blur(g, in, ds_av);
+  dt_gaussian_free(g);
+
+  interpolate_bilinear(ds_av, ds_width, ds_height, av, width, height, 2);
+
+  DT_OMP_FOR()
+  for(size_t k = 0; k < num_elem; k++)
+  {
+    const float avg = av[2 * k];
+    const float var = fmaxf(av[2 * k + 1] - avg * avg, 0.0f);
+    const float a = var / (var + feathering);
+    image[k] = a * image[k] + (1.0f - a) * avg;
+  }
+
+clean:
+  dt_free_align(av);
+  dt_free_align(ds_av);
+  dt_free_align(in);
+  dt_free_align(ds_image);
+}
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
